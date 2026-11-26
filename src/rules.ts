@@ -19,6 +19,7 @@ import type {
 } from "discord.js";
 import { Actions } from "./actions.js";
 import type { Config } from "./config.js";
+import { embedColors } from "./embeds.js";
 import {
   assertBotPermissions,
   discordCode,
@@ -163,7 +164,7 @@ export function renderRules(text: RulesText): APIEmbed[][] {
         ? { title: groups.length === 1 ? title : `${title} (continued)` }
         : {}),
       description,
-      color: 0x287d61,
+      color: embedColors.printBench,
     });
     size += description.length;
   }
@@ -277,7 +278,11 @@ async function updateRules(
       slot.id = existing.id;
       delete slot.pending;
       save();
-      if (digest(existing.embeds) !== expected) await existing.edit(payload);
+      if (
+        digest(existing.embeds) !== expected ||
+        existing.embeds.some(({ color }) => color !== embedColors.printBench)
+      )
+        await existing.edit(payload);
       continue;
     }
 
@@ -299,7 +304,11 @@ async function updateRules(
     slot.id = posted.id;
     delete slot.pending;
     save();
-    if (digest(posted.embeds) !== expected) await posted.edit(payload);
+    if (
+      digest(posted.embeds) !== expected ||
+      posted.embeds.some(({ color }) => color !== embedColors.printBench)
+    )
+      await posted.edit(payload);
   }
 
   for (const extra of publication.messages.slice(groups.length)) {

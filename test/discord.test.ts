@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ButtonStyle,
   ChannelType,
   Collection,
   MessageFlags,
@@ -8,7 +9,9 @@ import {
   PermissionsBitField,
 } from "discord.js";
 import type {
+  ActionRowBuilder,
   APIEmbed,
+  ButtonBuilder,
   Guild,
   Interaction,
   MessageCreateOptions,
@@ -25,6 +28,7 @@ import {
   reconcileMemberEvents,
   validateGuild,
 } from "../src/discord.js";
+import { embedColors, printBenchLogo } from "../src/embeds.js";
 import { acceptDelivery } from "../src/github.js";
 import { Store } from "../src/store.js";
 
@@ -346,6 +350,22 @@ function setup({ crossFeedAccess = false } = {}) {
 
 type Response = { content?: string; [key: string]: unknown };
 
+function firstEmbed(message: MessageCreateOptions) {
+  const [embed] = message.embeds ?? [];
+  assert.ok(embed && "toJSON" in embed);
+  return embed.toJSON();
+}
+
+function linkRows(message: MessageCreateOptions) {
+  const rows = (message.components ?? []) as ActionRowBuilder<ButtonBuilder>[];
+  return rows.map((row) =>
+    row.toJSON().components.map((button) => {
+      assert.ok(button.style === ButtonStyle.Link);
+      return [button.label, button.url];
+    }),
+  );
+}
+
 test("Discord setup reports the affected channel setting and preserves the original error code", async (t) => {
   const { guild, store } = setup();
   t.after(() => store.close());
@@ -505,6 +525,14 @@ test("support copies the chosen message once, queues a reply, and refuses unsafe
   assert.equal(operations.length, 1);
   assert.equal(operations[0].message.reply?.messageReference, original);
   assert.deepEqual(operations[0].message.allowedMentions?.parse, []);
+  assert.deepEqual(linkRows(operations[0].message), [
+    [
+      [
+        "Open Support post",
+        `https://discord.com/channels/${guildId}/${thread}`,
+      ],
+    ],
+  ]);
 });
 
 test("ban cancellation and hierarchy protect members, and an audit retry never issues another ban", async (t) => {
@@ -598,6 +626,18 @@ test("announcements only ping the release role for stable releases and welcome a
   assert.equal(stableRelease.content, `<@&${releaseRole}>`);
   assert.deepEqual(stableRelease.allowedMentions?.roles, [releaseRole]);
   assert.deepEqual(stableRelease.allowedMentions?.parse, []);
+  assert.equal(
+    firstEmbed(quietRelease).author?.name,
+    "PrintBench · Prerelease",
+  );
+  assert.notEqual(
+    firstEmbed(quietRelease).color,
+    firstEmbed(stableRelease).color,
+  );
+  assert.deepEqual(
+    linkRows(stableRelease)[0].map(([label]) => label),
+    ["Release notes", "Download Compose file"],
+  );
 
   person.pending = false;
   await reconcileMemberEvents(guild, store);
@@ -607,6 +647,16 @@ test("announcements only ping the release role for stable releases and welcome a
     operations.filter((entry) => entry.channel === welcome).length,
     1,
   );
+  const greeting = operations.find(
+    (entry) => entry.channel === welcome,
+  )!.message;
+  assert.deepEqual(greeting.allowedMentions?.users, [author]);
+  assert.deepEqual(linkRows(greeting), [
+    [
+      ["Server rules", `https://discord.com/channels/${guildId}/${rules}`],
+      ["Support forum", `https://discord.com/channels/${guildId}/${forum}`],
+    ],
+  ]);
   person.joinedTimestamp++;
   store.welcome(author, person.joinedTimestamp);
   await drainJobs(guild, config, store);
@@ -639,6 +689,16 @@ test("a confirmed Discord ban recovered from an interrupted request queues the p
     [audit],
   );
   assert.deepEqual(store.status().pendingBans, []);
+  const embed = firstEmbed(operations[0].message);
+  assert.equal(embed.color, embedColors.danger);
+  assert.deepEqual(
+    embed.fields?.map((field) => [field.name, field.value]),
+    [
+      ["Moderator", `<@${moderator}>\n\`${moderator}\``],
+      ["Target", `<@${author}>\n\`${author}\``],
+      ["Reason", "Spam"],
+    ],
+  );
 });
 
 test("the info command posts the five PrintBench links in a public response", async (t) => {
@@ -649,18 +709,52 @@ test("the info command posts the five PrintBench links in a public response", as
   await handle(result.input);
   const reply = result.output[0] as MessageCreateOptions;
   assert.equal(reply.flags, undefined);
-  const [embed] = reply.embeds ?? [];
-  assert.ok("toJSON" in embed);
-  const description = embed.toJSON().description;
-  for (const url of [
-    "https://printbench.app/",
-    "https://docs.printbench.app/",
-    "https://github.com/PrintBench/printbench",
-    "https://github.com/PrintBench/printbench/releases/latest",
-    "https://github.com/PrintBench/printbench/releases/latest/download/compose.yaml",
-  ]) {
-    assert.ok(description?.includes(`(${url})`));
-  }
+  const embed = firstEmbed(reply);
+  assert.equal(embed.color, embedColors.printBench);
+  assert.equal(embed.thumbnail?.url, printBenchLogo);
+  assert.deepEqual(linkRows(reply), [
+    [
+      ["Website", "https://printbench.app/"],
+      ["Documentation", "https://docs.printbench.app/"],
+      ["GitHub", "https://github.com/PrintBench/printbench"],
+    ],
+    [
+      [
+        "Latest release",
+        "https://github.com/PrintBench/printbench/releases/latest",
+      ],
+      [
+        "Download Compose file",
+        "https://github.com/PrintBench/printbench/releases/latest/download/compose.yaml",
+      ],
+    ],
+  ]);
+});
+
+test("releases with URLs too long for buttons still include the release and download links", async (t) => {
+  const { store, guild, operations } = setup();
+  t.after(() => store.close());
+  const tag = "é".repeat(90);
+  store.enqueue("release:long-tag", {
+    kind: "release",
+    release: {
+      id: 12,
+      tag,
+      published: "2026-11-26T12:00:00Z",
+      prerelease: false,
+      summary: "A release summary",
+    },
+  });
+  await drainJobs(guild, config, store);
+  const message = operations[0].message;
+  const description = firstEmbed(message).description!;
+  assert.deepEqual(linkRows(message), []);
+  assert.ok(description.includes(`/releases/tag/${encodeURIComponent(tag)}`));
+  assert.ok(
+    description.includes(
+      `/releases/download/${encodeURIComponent(tag)}/compose.yaml`,
+    ),
+  );
 });
 
 test("Support's Solved tag can be set and cleared without replacing other tags", async (t) => {
@@ -980,6 +1074,14 @@ test("rules require Manage Server and preview privately before stable publicatio
     JSON.stringify((reopened.output[0] as unknown as ModalBuilder).toJSON()),
     /New rules/,
   );
+  rulesPosts.get(primary)!.embeds[0].color = 0x287d61;
+  const sameRules = await flow.preview(reopened.input.id, "New rules");
+  await flow.choose(sameRules.input.id, "publish");
+  assert.deepEqual([...rulesPosts.keys()], [primary]);
+  assert.equal(
+    rulesPosts.get(primary)?.embeds[0].color,
+    embedColors.printBench,
+  );
 });
 
 test("publishing after an interrupted Discord response recovers the original rules message", async (t) => {
@@ -1151,12 +1253,11 @@ test("GitHub issues and pull requests reach their matching opt-in feeds without 
   for (const [index, { message }] of operations.entries()) {
     assert.deepEqual(message.allowedMentions?.parse, []);
     assert.equal(message.flags, MessageFlags.SuppressNotifications);
-    const embed = message.embeds?.[0];
-    assert.ok(embed && "toJSON" in embed);
-    assert.equal(
-      embed.toJSON().url,
-      `https://github.com/PrintBench/printbench/${index === 0 ? "issues/11" : "pull/12"}`,
-    );
+    const url = `https://github.com/PrintBench/printbench/${index === 0 ? "issues/11" : "pull/12"}`;
+    assert.equal(firstEmbed(message).url, url);
+    assert.deepEqual(linkRows(message), [
+      [[index === 0 ? "View issue" : "View pull request", url]],
+    ]);
   }
 });
 

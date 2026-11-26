@@ -14,6 +14,7 @@ import type {
   MessageCreateOptions,
 } from "discord.js";
 import type { Config } from "./config.js";
+import { embedColors, linkButtons, printBenchLogo } from "./embeds.js";
 import {
   channelOverwrites,
   coversSupportAudience,
@@ -273,12 +274,17 @@ function bounded(text: string, size: number) {
 
 type Announcement = {
   embed: EmbedBuilder;
+  components?: MessageCreateOptions["components"];
   content?: string;
   flags?: MessageCreateOptions["flags"];
   reply?: MessageCreateOptions["reply"];
   users?: string[];
   roles?: string[];
 };
+
+function auditMember(name: string, id: string) {
+  return { name, value: `<@${id}>\n\`${id}\``, inline: true };
+}
 
 function announcement(config: Config, job: Job): Announcement {
   switch (job.kind) {
@@ -289,25 +295,45 @@ function announcement(config: Config, job: Job): Announcement {
       const path = encodeURIComponent(release.tag);
       const releaseUrl = `${base}/tag/${path}`;
       const downloadUrl = `${base}/download/${path}/compose.yaml`;
+      const summary = release.summary
+        ? bounded(escapeMarkdown(release.summary), 1200)
+        : "";
+      const buttonsFit = downloadUrl.length <= 512;
       const embed = new EmbedBuilder()
-        .setColor(release.prerelease ? 0x997242 : 0x287d61)
-        .setTitle(
-          `PrintBench ${tag}${release.prerelease ? " · Prerelease" : ""}`,
+        .setColor(
+          release.prerelease ? embedColors.warning : embedColors.printBench,
         )
+        .setAuthor({
+          name: release.prerelease
+            ? "PrintBench · Prerelease"
+            : "PrintBench · Release",
+          iconURL: printBenchLogo,
+        })
+        .setTitle(tag)
         .setURL(releaseUrl)
-        .setDescription(
+        .setTimestamp(new Date(release.published));
+      if (!buttonsFit) {
+        embed.setDescription(
           [
-            release.summary
-              ? bounded(escapeMarkdown(release.summary), 1200)
-              : "",
+            summary,
             `[Release notes](${releaseUrl}) · [Download Compose file](${downloadUrl})`,
           ]
             .filter(Boolean)
             .join("\n\n"),
-        )
-        .setTimestamp(new Date(release.published));
+        );
+      } else if (summary) {
+        embed.setDescription(summary);
+      }
       return {
         embed,
+        components: buttonsFit
+          ? [
+              linkButtons(
+                ["Release notes", releaseUrl],
+                ["Download Compose file", downloadUrl],
+              ),
+            ]
+          : undefined,
         content: release.prerelease ? undefined : `<@&${config.releaseRole}>`,
         roles: release.prerelease ? [] : [config.releaseRole],
         flags: release.prerelease
@@ -317,43 +343,61 @@ function announcement(config: Config, job: Job): Announcement {
     }
     case "activity": {
       const pull = job.event === "pull";
+      const url = `https://github.com/${config.repository}/${pull ? "pull" : "issues"}/${job.number}`;
       const embed = new EmbedBuilder()
-        .setColor(pull ? 0x6e54c2 : 0x287d61)
-        .setTitle(
-          bounded(
-            `${pull ? "Pull request" : "Issue"} #${job.number} · ${escapeMarkdown(job.title)}`,
-            256,
-          ),
-        )
-        .setURL(
-          `https://github.com/${config.repository}/${pull ? "pull" : "issues"}/${job.number}`,
-        )
-        .setDescription(
-          `Opened by **${escapeMarkdown(job.author)}** in ${config.repository}`,
+        .setColor(pull ? embedColors.pullRequest : embedColors.issue)
+        .setAuthor({
+          name: `${pull ? "Pull request" : "Issue"} #${job.number}`,
+        })
+        .setTitle(bounded(escapeMarkdown(job.title), 256))
+        .setURL(url)
+        .addFields(
+          { name: "Repository", value: config.repository, inline: true },
+          {
+            name: "Opened by",
+            value: escapeMarkdown(job.author),
+            inline: true,
+          },
         );
-      return { embed, flags: MessageFlags.SuppressNotifications };
+      return {
+        embed,
+        components: [
+          linkButtons([pull ? "View pull request" : "View issue", url]),
+        ],
+        flags: MessageFlags.SuppressNotifications,
+      };
     }
     case "welcome":
       return {
         content: `Welcome, <@${job.member}>!`,
         users: [job.member],
-        embed: new EmbedBuilder().setDescription(
-          `Start with <#${config.rules}> and ask technical questions in <#${config.support}>. Use \`/info\` for PrintBench links.`,
-        ),
+        embed: new EmbedBuilder()
+          .setColor(embedColors.printBench)
+          .setTitle("Getting started with PrintBench")
+          .setDescription(
+            "Ask technical questions in Support. Use `/info` for downloads and documentation.",
+          ),
+        components: [
+          linkButtons(
+            [
+              "Server rules",
+              `https://discord.com/channels/${config.guild}/${config.rules}`,
+            ],
+            [
+              "Support forum",
+              `https://discord.com/channels/${config.guild}/${config.support}`,
+            ],
+          ),
+        ],
       };
     case "audit":
       return {
         embed: new EmbedBuilder()
+          .setColor(embedColors.danger)
           .setTitle("Member banned")
           .addFields(
-            {
-              name: "Moderator",
-              value: `<@${job.ban.moderator}> (\`${job.ban.moderator}\`)`,
-            },
-            {
-              name: "Target",
-              value: `<@${job.ban.target}> (\`${job.ban.target}\`)`,
-            },
+            auditMember("Moderator", job.ban.moderator),
+            auditMember("Target", job.ban.target),
             { name: "Reason", value: escapeMarkdown(job.ban.reason) },
           )
           .setTimestamp(new Date(job.ban.created)),
@@ -367,13 +411,18 @@ function announcement(config: Config, job: Job): Announcement {
         contributor: "Contributor role granted",
       }[entry.action];
       const embed = new EmbedBuilder()
+        .setColor(
+          {
+            kick: embedColors.danger,
+            timeout: embedColors.warning,
+            untimeout: embedColors.printBench,
+            contributor: embedColors.printBench,
+          }[entry.action],
+        )
         .setTitle(title)
         .addFields(
-          {
-            name: "Requested by",
-            value: `<@${entry.moderator}> (\`${entry.moderator}\`)`,
-          },
-          { name: "Member", value: `<@${entry.target}> (\`${entry.target}\`)` },
+          auditMember("Requested by", entry.moderator),
+          auditMember("Member", entry.target),
           { name: "Reason", value: escapeMarkdown(entry.reason) },
         )
         .setTimestamp(new Date(entry.created));
@@ -391,9 +440,15 @@ function announcement(config: Config, job: Job): Announcement {
     }
     case "redirect":
       return {
-        embed: new EmbedBuilder().setDescription(
-          `Continue this question in [the Support post](https://discord.com/channels/${config.guild}/${job.thread}).`,
-        ),
+        embed: new EmbedBuilder()
+          .setColor(embedColors.printBench)
+          .setTitle("Question routed to Support"),
+        components: [
+          linkButtons([
+            "Open Support post",
+            `https://discord.com/channels/${config.guild}/${job.thread}`,
+          ]),
+        ],
         reply: { messageReference: job.message, failIfNotExists: true },
       };
   }
@@ -494,10 +549,8 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           continue;
         }
       }
-      const { embed, content, roles, flags, users, reply } = announcement(
-        config,
-        job,
-      );
+      const { embed, components, content, roles, flags, users, reply } =
+        announcement(config, job);
       store.startJob(row.id);
       const posted = await channel.send({
         content,
@@ -506,6 +559,7 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
         nonce,
         enforceNonce: true,
         embeds: [embed.setFooter({ text: marker })],
+        components,
         allowedMentions: { parse: [], repliedUser: false, users, roles },
       });
       store.sent(row.id, posted.id);

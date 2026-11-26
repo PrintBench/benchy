@@ -44,6 +44,7 @@ import {
   UserError,
 } from "./discord.js";
 import { errorDetails, log } from "./log.js";
+import { embedColors, linkButtons, printBenchLogo } from "./embeds.js";
 import { channelOverwrites, coversSupportAudience } from "./permissions.js";
 import { rulesCommands, setupCommand } from "./rules.js";
 import type { Ban, Store } from "./store.js";
@@ -242,16 +243,28 @@ function canModerate(
 }
 
 function info() {
-  return new EmbedBuilder()
-    .setColor(0x287d61)
-    .setTitle("PrintBench")
-    .setURL(project.website)
-    .setDescription(
-      [
-        `[Website](${project.website}) · [Documentation](${project.docs}) · [GitHub](${project.github})`,
-        `[Latest release](${project.releases}) · [Download Compose file](${project.download})`,
-      ].join("\n"),
-    );
+  return {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(embedColors.printBench)
+        .setTitle("PrintBench")
+        .setDescription(
+          "Organise your 3D print files in one self-hosted library.",
+        )
+        .setThumbnail(printBenchLogo),
+    ],
+    components: [
+      linkButtons(
+        ["Website", project.website],
+        ["Documentation", project.docs],
+        ["GitHub", project.github],
+      ),
+      linkButtons(
+        ["Latest release", project.releases],
+        ["Download Compose file", project.download],
+      ),
+    ],
+  };
 }
 
 function messageLink(guild: string, source: string, message: string) {
@@ -829,7 +842,7 @@ export function commandHandlers(
             break;
           case "info":
             await interaction.reply({
-              embeds: [info()],
+              ...info(),
               allowedMentions: quiet,
             });
             break;
