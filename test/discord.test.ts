@@ -15,20 +15,22 @@ import type {
   ModalBuilder,
 } from "discord.js";
 import { commandHandlers } from "../src/commands.js";
+import { loadConfig } from "../src/config.js";
 import type { Config } from "../src/config.js";
 import { contributorClaims } from "../src/contributors.js";
 import { drainJobs, reconcileMemberEvents } from "../src/discord.js";
+import { acceptDelivery } from "../src/github.js";
 import { Store } from "../src/store.js";
 
-const ids = Array.from({ length: 20 }, (_, index) =>
+const ids = Array.from({ length: 22 }, (_, index) =>
   String(101000000000000000n + BigInt(index)),
 );
 const [
   guildId,
   release,
   releaseRole,
-  feed,
-  feedRole,
+  pullChannel,
+  pullRole,
   forum,
   source,
   audit,
@@ -43,14 +45,19 @@ const [
   original,
   command,
   privileged,
+  contributorRole,
+  issueChannel,
+  issueRole,
 ] = ids;
 const config: Config = {
   token: "test-only",
   guild: guildId,
   releases: release,
   releaseRole,
-  github: feed,
-  githubRole: feedRole,
+  github: {
+    pull: { channel: pullChannel, role: pullRole },
+    issue: { channel: issueChannel, role: issueRole },
+  },
   support: forum,
   sources: [source],
   audit,
@@ -62,7 +69,6 @@ const config: Config = {
   port: 3000,
   dataDirectory: ":memory:",
 };
-const contributorRole = ids[19];
 const configWithContributor: Config = {
   ...config,
   contributor: {
@@ -74,7 +80,7 @@ const configWithContributor: Config = {
   },
 };
 
-function setup() {
+function setup({ crossFeedAccess = false } = {}) {
   const store = new Store(":memory:");
   const operations: { channel: string; message: MessageCreateOptions }[] = [];
   const auditErrors: Error[] = [];
@@ -245,7 +251,11 @@ function setup() {
   };
   const channels = [
     text(release),
-    text(feed, [botRole, feedRole]),
+    text(pullChannel, [botRole, pullRole]),
+    text(
+      issueChannel,
+      crossFeedAccess ? [botRole, issueRole, pullRole] : [botRole, issueRole],
+    ),
     general,
     support,
     text(audit, [modRole, botRole]),
@@ -934,4 +944,115 @@ test("publishing after an interrupted Discord response recovers the original rul
     "Rules after interruption",
   );
   assert.equal(store.readRules(rules).messages[0].id, published);
+});
+
+const githubEnv = {
+  DISCORD_TOKEN: "test-only",
+  DISCORD_GUILD_ID: guildId,
+  DISCORD_RELEASES_CHANNEL_ID: release,
+  DISCORD_RELEASE_PINGS_ROLE_ID: releaseRole,
+  DISCORD_GITHUB_PULL_CHANNEL_ID: pullChannel,
+  DISCORD_GITHUB_PULL_ROLE_ID: pullRole,
+  DISCORD_GITHUB_ISSUE_CHANNEL_ID: issueChannel,
+  DISCORD_GITHUB_ISSUE_ROLE_ID: issueRole,
+  DISCORD_SUPPORT_FORUM_ID: forum,
+  DISCORD_SUPPORT_SOURCE_IDS: source,
+  DISCORD_MOD_LOG_CHANNEL_ID: audit,
+  DISCORD_MODERATOR_ROLE_IDS: modRole,
+  DISCORD_WELCOME_CHANNEL_ID: welcome,
+  DISCORD_RULES_CHANNEL_ID: rules,
+  GITHUB_WEBHOOK_SECRET: "test-only-webhook-secret-with-enough-characters",
+};
+
+test("GitHub feeds require distinct roles and channels", () => {
+  assert.deepEqual(loadConfig(githubEnv).github, config.github);
+  assert.throws(
+    () => loadConfig({ ...githubEnv, DISCORD_GITHUB_ISSUE_ROLE_ID: pullRole }),
+    /must use distinct IDs/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        ...githubEnv,
+        DISCORD_GITHUB_ISSUE_CHANNEL_ID: pullChannel,
+      }),
+    /must use distinct IDs/,
+  );
+  assert.throws(
+    () => loadConfig({ ...githubEnv, DISCORD_GITHUB_PULL_ROLE_ID: "" }),
+    /Missing DISCORD_GITHUB_PULL_ROLE_ID/,
+  );
+});
+
+function enqueueGitHubActivity(store: Store) {
+  const repository = { full_name: config.repository };
+  const issue = {
+    number: 11,
+    title: "Issue @everyone",
+    user: { login: "contributor" },
+  };
+  assert.equal(
+    acceptDelivery(
+      store,
+      config.repository,
+      "issues",
+      "7b68c995-85b5-43ce-af7e-7b669a6e3ab4",
+      {
+        repository,
+        action: "opened",
+        issue,
+      },
+    ),
+    202,
+  );
+  assert.equal(
+    acceptDelivery(
+      store,
+      config.repository,
+      "pull_request",
+      "7b68c995-85b5-43ce-af7e-7b669a6e3ab5",
+      {
+        repository,
+        action: "opened",
+        pull_request: { ...issue, number: 12, title: "Pull request" },
+      },
+    ),
+    202,
+  );
+}
+
+test("GitHub issues and pull requests reach their matching opt-in feeds without pings", async (t) => {
+  const { store, guild, operations } = setup();
+  t.after(() => store.close());
+  enqueueGitHubActivity(store);
+  await drainJobs(guild, config, store);
+  assert.deepEqual(
+    operations.map(({ channel }) => channel),
+    [issueChannel, pullChannel],
+  );
+  for (const [index, { message }] of operations.entries()) {
+    assert.deepEqual(message.allowedMentions?.parse, []);
+    assert.equal(message.flags, MessageFlags.SuppressNotifications);
+    const embed = message.embeds?.[0];
+    assert.ok(embed && "toJSON" in embed);
+    assert.equal(
+      embed.toJSON().url,
+      `https://github.com/PrintBench/printbench/${index === 0 ? "issues/11" : "pull/12"}`,
+    );
+  }
+});
+
+test("Benchy refuses a GitHub feed whose permissions let the other opt-in role view it", async (t) => {
+  const { store, guild, operations } = setup({ crossFeedAccess: true });
+  t.after(() => store.close());
+  enqueueGitHubActivity(store);
+  await drainJobs(guild, config, store);
+  assert.deepEqual(
+    operations.map(({ channel }) => channel),
+    [pullChannel],
+  );
+  assert.deepEqual(
+    store.status().failed.map(({ id }) => id),
+    [`github:printbench/printbench:issue:11`],
+  );
 });
