@@ -18,7 +18,13 @@ import { commandHandlers } from "../src/commands.js";
 import { loadConfig } from "../src/config.js";
 import type { Config } from "../src/config.js";
 import { contributorClaims } from "../src/contributors.js";
-import { drainJobs, reconcileMemberEvents } from "../src/discord.js";
+import {
+  checkDiscordSetup,
+  DiscordSetupError,
+  drainJobs,
+  reconcileMemberEvents,
+  validateGuild,
+} from "../src/discord.js";
 import { acceptDelivery } from "../src/github.js";
 import { Store } from "../src/store.js";
 
@@ -283,6 +289,12 @@ function setup({ crossFeedAccess = false } = {}) {
     },
     roles: {
       everyone: { permissions: ordinary },
+      cache: new Collection(
+        [releaseRole, pullRole, issueRole, modRole].map((id) => [
+          id,
+          { id, mentionable: id === releaseRole },
+        ]),
+      ),
       fetch: async (role?: string) =>
         role
           ? { id: releaseRole, mentionable: true }
@@ -333,6 +345,59 @@ function setup({ crossFeedAccess = false } = {}) {
 }
 
 type Response = { content?: string; [key: string]: unknown };
+
+test("Discord setup reports the affected channel setting and preserves the original error code", async (t) => {
+  const { guild, store } = setup();
+  t.after(() => store.close());
+  const fetchChannel = guild.channels.fetch.bind(guild.channels);
+  const denial = Object.assign(new Error("Raw Discord response"), {
+    code: 50001,
+    status: 403,
+  });
+  let deniedChannel = issueChannel;
+  t.mock.method(
+    guild.channels,
+    "fetch",
+    async (id: string, options: object) => {
+      if (id === deniedChannel) throw denial;
+      return fetchChannel(id, options);
+    },
+  );
+  const expected = (step: string, id: string) => (error: unknown) => {
+    assert.ok(error instanceof DiscordSetupError);
+    assert.equal(error.step, step);
+    assert.equal(error.cause, denial);
+    assert.ok(
+      error.message.includes(id) && error.message.includes("View Channel"),
+    );
+    return true;
+  };
+  await assert.rejects(
+    validateGuild(guild, config),
+    expected("DISCORD_GITHUB_ISSUE_CHANNEL_ID", issueChannel),
+  );
+  deniedChannel = source;
+  await assert.rejects(
+    validateGuild(guild, config),
+    expected("DISCORD_SUPPORT_SOURCE_IDS", source),
+  );
+});
+
+test("Discord setup preserves transient errors for the existing retry loop", async () => {
+  const outage = Object.assign(new Error("Discord unavailable"), {
+    status: 503,
+  });
+  await assert.rejects(
+    checkDiscordSetup(
+      "register_guild_commands",
+      "Check the install",
+      async () => {
+        throw outage;
+      },
+    ),
+    (error) => error === outage,
+  );
+});
 
 function interaction(
   guild: Guild,
