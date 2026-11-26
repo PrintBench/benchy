@@ -18,6 +18,12 @@ export type Ban = {
   created: number;
 };
 
+export type MemberAudit = Omit<Ban, "id"> & {
+  action: "kick" | "timeout" | "untimeout" | "contributor";
+  until?: number;
+  evidence?: string;
+};
+
 export type Job =
   | { kind: "release"; release: Release }
   | {
@@ -30,6 +36,7 @@ export type Job =
     }
   | { kind: "welcome"; member: string; joined: number }
   | { kind: "audit"; ban: Ban }
+  | { kind: "member-audit"; entry: MemberAudit }
   | { kind: "redirect"; source: string; message: string; thread: string };
 
 type JobRow = {
@@ -74,6 +81,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bans_pending (
         id TEXT PRIMARY KEY, moderator TEXT NOT NULL, target TEXT NOT NULL UNIQUE,
         reason TEXT NOT NULL, created INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS contributor_accounts (
+        discord TEXT PRIMARY KEY, github TEXT NOT NULL UNIQUE
       );
     `);
   }
@@ -294,6 +304,25 @@ export class Store {
     this.transaction(() => {
       this.enqueue(`audit:${ban.id}`, { kind: "audit", ban });
       this.clearBan(ban.id);
+    });
+  }
+
+  recordMemberAudit(id: string, entry: MemberAudit) {
+    this.enqueue(`member-audit:${id}`, { kind: "member-audit", entry });
+  }
+
+  claimContributor(discord: string, github: string) {
+    return this.transaction(() => {
+      this.db
+        .prepare("INSERT OR IGNORE INTO contributor_accounts VALUES (?, ?)")
+        .run(discord, github);
+      return Boolean(
+        this.db
+          .prepare(
+            "SELECT 1 FROM contributor_accounts WHERE discord = ? AND github = ?",
+          )
+          .get(discord, github),
+      );
     });
   }
 

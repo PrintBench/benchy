@@ -89,6 +89,16 @@ export async function supportForum(guild: Guild, id: string) {
   return forum;
 }
 
+export function isSolvedTag(tag: { name: string }) {
+  return tag.name.trim().toLowerCase() === "solved";
+}
+
+export function initialSupportTag(
+  forum: Awaited<ReturnType<typeof supportForum>>,
+) {
+  return forum.availableTags.find((tag) => !tag.moderated && !isSolvedTag(tag));
+}
+
 export async function staffChannel(
   guild: Guild,
   config: Config,
@@ -149,10 +159,7 @@ export async function validateGuild(guild: Guild, config: Config) {
     ReadMessageHistory,
     ManageThreads,
   ]);
-  if (
-    forum.flags.has("RequireTag") &&
-    !forum.availableTags.some((tag) => !tag.moderated)
-  ) {
+  if (forum.flags.has("RequireTag") && !initialSupportTag(forum)) {
     throw new UserError(
       "The Support forum needs an available non-moderated tag or optional tags.",
     );
@@ -284,6 +291,37 @@ function announcement(config: Config, job: Job): Announcement {
           )
           .setTimestamp(new Date(job.ban.created)),
       };
+    case "member-audit": {
+      const entry = job.entry;
+      const title = {
+        kick: "Member kicked",
+        timeout: "Member timed out",
+        untimeout: "Member timeout removed",
+        contributor: "Contributor role granted",
+      }[entry.action];
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .addFields(
+          {
+            name: "Requested by",
+            value: `<@${entry.moderator}> (\`${entry.moderator}\`)`,
+          },
+          { name: "Member", value: `<@${entry.target}> (\`${entry.target}\`)` },
+          { name: "Reason", value: escapeMarkdown(entry.reason) },
+        )
+        .setTimestamp(new Date(entry.created));
+      if (entry.until)
+        embed.addFields({
+          name: "Ends",
+          value: `<t:${Math.floor(entry.until / 1000)}:F>`,
+        });
+      if (entry.evidence)
+        embed.addFields({
+          name: "GitHub contribution",
+          value: `<${entry.evidence}>`,
+        });
+      return { embed };
+    }
     case "redirect":
       return {
         embed: new EmbedBuilder().setDescription(
@@ -348,8 +386,13 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           break;
         }
         case "audit":
+        case "member-audit":
         case "activity":
-          channel = await staffChannel(guild, config, job.kind);
+          channel = await staffChannel(
+            guild,
+            config,
+            job.kind === "activity" ? "activity" : "audit",
+          );
           break;
         case "release":
           channel = await textChannel(guild, config.releases);

@@ -7,6 +7,12 @@ export const project = {
     "https://github.com/PrintBench/printbench/releases/latest/download/compose.yaml",
 };
 
+export type ContributorConfig = {
+  role: string;
+  oauth?: { secret: string; redirect: string };
+};
+export const contributorCallback = "/oauth/discord/callback";
+
 export function loadConfig(env = process.env) {
   function required(name: string) {
     const value = env[name]?.trim();
@@ -40,6 +46,37 @@ export function loadConfig(env = process.env) {
   const port = Number(env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid PORT");
+
+  const contributorRole = env.DISCORD_CONTRIBUTOR_ROLE_ID?.trim();
+  const oauthSecret = env.DISCORD_OAUTH_CLIENT_SECRET?.trim();
+  const publicUrl = env.BENCHY_PUBLIC_URL?.trim();
+  if (contributorRole && !/^\d{17,20}$/.test(contributorRole))
+    throw new Error("Invalid DISCORD_CONTRIBUTOR_ROLE_ID");
+  let contributor: ContributorConfig | undefined;
+  if (contributorRole) contributor = { role: contributorRole };
+  if (oauthSecret) {
+    if (!contributor || !publicUrl)
+      throw new Error(
+        "Discord OAuth needs DISCORD_CONTRIBUTOR_ROLE_ID and BENCHY_PUBLIC_URL",
+      );
+    const address = URL.parse(publicUrl);
+    if (
+      !address ||
+      address.protocol !== "https:" ||
+      address.username ||
+      address.password ||
+      address.pathname !== "/" ||
+      address.search ||
+      address.hash
+    )
+      throw new Error(
+        "BENCHY_PUBLIC_URL must be an HTTPS origin such as https://benchy.example.com",
+      );
+    contributor.oauth = {
+      secret: oauthSecret,
+      redirect: `${address.origin}${contributorCallback}`,
+    };
+  }
 
   const config = {
     token: required("DISCORD_TOKEN"),
@@ -78,7 +115,19 @@ export function loadConfig(env = process.env) {
   ) {
     throw new Error("Benchy channels and groups must use distinct IDs");
   }
-  return config;
+  if (
+    contributor &&
+    [
+      config.guild,
+      config.releaseRole,
+      config.githubRole,
+      ...config.moderators,
+    ].includes(contributor.role)
+  )
+    throw new Error(
+      "The Contributor role must be distinct from the server's other configured roles",
+    );
+  return { ...config, ...(contributor ? { contributor } : {}) };
 }
 
 export type Config = ReturnType<typeof loadConfig>;

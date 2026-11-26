@@ -8,6 +8,7 @@ import {
 import type { Guild, GuildMember } from "discord.js";
 import { commands, commandHandlers } from "./commands.js";
 import { loadConfig } from "./config.js";
+import { contributorClaims } from "./contributors.js";
 import {
   drainJobs,
   quiet,
@@ -26,12 +27,15 @@ const client = new Client({
   allowedMentions: quiet,
   rest: { timeout: 15_000, retries: 0 },
 });
-const handleCommand = commandHandlers(config, store);
 const poll = releasePoller(config.repository, store);
 const active = new Map<string, Promise<void>>();
 const intervals: NodeJS.Timeout[] = [];
 let shuttingDown = false;
 let configuredGuild: Guild | undefined;
+const claims = contributorClaims(config, store, () =>
+  guildReady() ? configuredGuild : undefined,
+);
+const handleCommand = commandHandlers(config, store, claims);
 
 function startTask(name: string, action: () => Promise<unknown>) {
   if (active.has(name) || shuttingDown) return;
@@ -121,7 +125,13 @@ client.once(Events.ClientReady, () =>
   startTask("configure_discord", configureDiscord),
 );
 
-const server = webServer(config, store, guildReady, () => !shuttingDown);
+const server = webServer(
+  config,
+  store,
+  guildReady,
+  () => !shuttingDown,
+  claims?.complete,
+);
 server.on("error", (error) => {
   log("error", "http_server_failed", errorDetails(error));
   void shutdown(1);
