@@ -7,9 +7,16 @@ import {
   OverwriteType,
   PermissionsBitField,
 } from "discord.js";
-import type { Guild, Interaction, MessageCreateOptions } from "discord.js";
+import type {
+  APIEmbed,
+  Guild,
+  Interaction,
+  MessageCreateOptions,
+  ModalBuilder,
+} from "discord.js";
 import { commandHandlers } from "../src/commands.js";
 import type { Config } from "../src/config.js";
+import { contributorClaims } from "../src/contributors.js";
 import { drainJobs, reconcileMemberEvents } from "../src/discord.js";
 import { Store } from "../src/store.js";
 
@@ -55,6 +62,17 @@ const config: Config = {
   port: 3000,
   dataDirectory: ":memory:",
 };
+const contributorRole = ids[19];
+const configWithContributor: Config = {
+  ...config,
+  contributor: {
+    role: contributorRole,
+    oauth: {
+      secret: "test-secret",
+      redirect: "https://benchy.example.com/oauth/discord/callback",
+    },
+  },
+};
 
 function setup() {
   const store = new Store(":memory:");
@@ -65,6 +83,8 @@ function setup() {
     { reason: string; deleteMessageSeconds: number }
   >();
   const posts: { name: string; message: { content: string } }[] = [];
+  const timeouts: { id: string; until: number | null; reason: string }[] = [];
+  const kicks: { id: string; reason: string }[] = [];
   const full = new PermissionsBitField(PermissionsBitField.All);
   const ordinary = new PermissionsBitField([
     "ViewChannel",
@@ -74,6 +94,7 @@ function setup() {
   const joined = 1760000000000;
 
   function staffMember(id: string, level: number, staff = false) {
+    const cache = new Collection(staff ? [[modRole, {}]] : []);
     return {
       id,
       guild: { ownerId: "owner" },
@@ -82,7 +103,8 @@ function setup() {
       joinedTimestamp: joined,
       isCommunicationDisabled: () => false,
       roles: {
-        cache: new Collection(staff ? [[modRole, {}]] : []),
+        cache,
+        add: async (role: string) => cache.set(role, {}),
         highest: {
           level,
           comparePositionTo: (other: { level: number }) => level - other.level,
@@ -90,6 +112,12 @@ function setup() {
         botRole: id === bot ? { id: botRole } : undefined,
       },
       permissions: staff ? full : ordinary,
+      async kick(reason: string) {
+        kicks.push({ id, reason });
+      },
+      async disableCommunicationUntil(until: number | null, reason: string) {
+        timeouts.push({ id, until, reason });
+      },
     };
   }
 
@@ -140,7 +168,7 @@ function setup() {
     ...text(forum),
     type: ChannelType.GuildForum,
     flags: { has: () => false },
-    availableTags: [],
+    availableTags: [{ id: "solved-tag", name: "Solved", moderated: true }],
     allCanReply: true,
     permissionsFor(person: { id: string }) {
       return person.id === author && !this.allCanReply
@@ -161,10 +189,58 @@ function setup() {
     archived: false,
     isThread: () => true,
     permissionsFor: () => full,
+    appliedTags: ["question-tag"],
+    async setAppliedTags(tags: string[]) {
+      this.appliedTags = tags;
+    },
     async edit(options: { locked: boolean; archived: boolean }) {
       this.locked = options.locked;
       this.archived = options.archived;
       return this;
+    },
+  };
+  type RulesPost = {
+    id: string;
+    embeds: APIEmbed[];
+    createdTimestamp: number;
+    author: { id: string };
+  };
+  const rulesPosts = new Collection<string, RulesPost>();
+  const rulesErrors: Error[] = [];
+  let rulesPostCount = 0;
+  const rulesChannel = {
+    ...text(rules),
+    client: { user: { id: bot } },
+    messages: {
+      fetch: async (query: { message?: string }) => {
+        if (!query.message) return rulesPosts;
+        const existing = rulesPosts.get(query.message);
+        if (!existing)
+          throw Object.assign(new Error("Unknown message"), { code: 10008 });
+        return existing;
+      },
+    },
+    send: async (message: {
+      embeds: APIEmbed[];
+      allowedMentions: MessageCreateOptions["allowedMentions"];
+    }) => {
+      assert.deepEqual(message.allowedMentions?.parse, []);
+      const published = {
+        id: `rules-${++rulesPostCount}`,
+        embeds: message.embeds,
+        createdTimestamp: Date.now(),
+        author: { id: bot },
+        async edit(options: { embeds: APIEmbed[] }) {
+          this.embeds = options.embeds;
+          return this;
+        },
+        async delete() {
+          rulesPosts.delete(this.id);
+        },
+      };
+      rulesPosts.set(published.id, published);
+      if (rulesErrors.length) throw rulesErrors.shift();
+      return published;
     },
   };
   const channels = [
@@ -174,6 +250,7 @@ function setup() {
     support,
     text(audit, [modRole, botRole]),
     text(welcome),
+    rulesChannel,
     post,
   ];
   const people = new Map([
@@ -196,7 +273,19 @@ function setup() {
     },
     roles: {
       everyone: { permissions: ordinary },
-      fetch: async () => ({ id: releaseRole, mentionable: true }),
+      fetch: async (role?: string) =>
+        role
+          ? { id: releaseRole, mentionable: true }
+          : new Collection([
+              [
+                contributorRole,
+                {
+                  id: contributorRole,
+                  level: 2,
+                  permissions: new PermissionsBitField(),
+                },
+              ],
+            ]),
     },
     bans: {
       fetch: async ({ user }: { user: string }) => {
@@ -226,6 +315,10 @@ function setup() {
     posts,
     post,
     joined,
+    kicks,
+    timeouts,
+    rulesPosts,
+    rulesErrors,
   };
 }
 
@@ -247,6 +340,7 @@ function interaction(
       id: moderator,
       guild: { ownerId: "owner" },
       roles: { cache: new Collection([[modRole, {}]]) },
+      permissions: new PermissionsBitField(PermissionsBitField.All),
     },
     memberPermissions: new PermissionsBitField(PermissionsBitField.All),
     inCachedGuild: () => true,
@@ -269,6 +363,9 @@ function interaction(
     },
     async update(body: Response) {
       this.replied = true;
+      output.push(body);
+    },
+    async followUp(body: Response) {
       output.push(body);
     },
     async editReply(body: Response | string) {
@@ -489,4 +586,352 @@ test("the info command posts the five PrintBench links in a public response", as
   ]) {
     assert.ok(description?.includes(`(${url})`));
   }
+});
+
+test("Support's Solved tag can be set and cleared without replacing other tags", async (t) => {
+  const { store, guild, post } = setup();
+  t.after(() => store.close());
+  const handle = commandHandlers(config, store);
+  async function resolve(solved: boolean | null = null) {
+    const action = interaction(guild, "slash", {
+      commandName: "resolve",
+      channelId: thread,
+      options: { getBoolean: () => solved },
+    });
+    await handle(action.input);
+    return action.output.at(-1)?.content;
+  }
+  await resolve();
+  await resolve();
+  assert.deepEqual(post.appliedTags, ["question-tag", "solved-tag"]);
+  await resolve(false);
+  assert.deepEqual(post.appliedTags, ["question-tag"]);
+  post.appliedTags = ["one", "two", "three", "four", "five"];
+  assert.match((await resolve()) ?? "", /Remove one existing tag/);
+  assert.equal(post.appliedTags.length, 5);
+  post.appliedTags = ["question-tag"];
+  post.archived = true;
+  assert.match((await resolve()) ?? "", /Reopen the Support post/);
+  assert.equal(post.archived, true);
+});
+
+test("kicks and timeouts require confirmation and send successful actions to the private audit queue", async (t) => {
+  const { store, guild, kicks, timeouts, operations } = setup();
+  t.after(() => store.close());
+  const handle = commandHandlers(config, store);
+  async function moderate(
+    commandName: "kick" | "timeout" | "untimeout",
+    decision: "confirm" | "cancel",
+    options = { target: author, minutes: 15 },
+  ) {
+    const id = String(BigInt(command) + BigInt(++sequence));
+    const slash = interaction(guild, "slash", {
+      id,
+      commandName,
+      options: {
+        getString: () => "Disruptive behaviour",
+        getInteger: () => options.minutes,
+        getUser: () => ({ id: options.target }),
+      },
+    });
+    await handle(slash.input);
+    assert.equal(slash.output[0].flags, MessageFlags.Ephemeral);
+    const button = interaction(guild, "button", {
+      customId: `${commandName}-${decision}:${id}`,
+    });
+    await handle(button.input);
+    return button.output.at(-1)?.content;
+  }
+  let sequence = 0;
+  assert.equal(await moderate("kick", "cancel"), "Kick cancelled.");
+  assert.equal(kicks.length, 0);
+  assert.match(
+    (await moderate("timeout", "confirm", {
+      target: privileged,
+      minutes: 15,
+    })) ?? "",
+    /role hierarchy/,
+  );
+  assert.equal(timeouts.length, 0);
+  await moderate("timeout", "confirm");
+  assert.equal(timeouts[0].id, author);
+  assert.ok(timeouts[0].until! - Date.now() <= 15 * 60_000);
+  assert.ok(timeouts[0].until! - Date.now() > 14 * 60_000);
+  await moderate("untimeout", "confirm");
+  assert.equal(timeouts[1].until, null);
+  await moderate("kick", "confirm");
+  assert.deepEqual(
+    kicks.map(({ id }) => id),
+    [author],
+  );
+  await drainJobs(guild, config, store);
+  assert.deepEqual(
+    operations.map(({ channel }) => channel),
+    [audit, audit, audit],
+  );
+});
+
+test("a moderator can recognize a GitHub issue contribution while ordinary members cannot grant roles", async (t) => {
+  const { store, guild, people } = setup();
+  t.after(() => store.close());
+  const handle = commandHandlers(configWithContributor, store);
+  const base = {
+    commandName: "contributor",
+    options: {
+      getSubcommand: () => "grant",
+      getUser: () => ({ id: author }),
+      getString: (option: string) =>
+        option === "evidence"
+          ? "https://github.com/PrintBench/printbench-docs/issues/4#issuecomment-5"
+          : null,
+    },
+  };
+  const regular = interaction(guild, "slash", {
+    ...base,
+    user: { id: author },
+    member: people.get(author),
+  });
+  await handle(regular.input);
+  assert.match(
+    regular.output.at(-1)?.content ?? "",
+    /Only PrintBench moderators/,
+  );
+  assert.equal(people.get(author)?.roles.cache.has(contributorRole), false);
+
+  const staff = interaction(guild, "slash", base);
+  await handle(staff.input);
+  assert.match(staff.output.at(-1)?.content ?? "", /Contributor role granted/);
+  assert.equal(people.get(author)?.roles.cache.has(contributorRole), true);
+  const [job] = store.nextJobs();
+  assert.equal(job.job.kind, "member-audit");
+  assert.match(
+    job.job.entry.evidence ?? "",
+    /printbench-docs\/issues\/4#issuecomment-5$/,
+  );
+});
+
+test("Contributor claims bind OAuth to the Discord user and verify merged PR authorship across organization repositories", async (t) => {
+  const { store, guild, people } = setup();
+  t.after(() => store.close());
+  const account = "22135084";
+  let signedIn = privileged;
+  let githubFetches = 0;
+  let prAuthor = 12;
+  let mergedAt: string | null = "2026-01-01T00:00:00Z";
+  const safeFetch: typeof fetch = async (input, options) => {
+    const url = new URL(String(input));
+    if (url.host === "discord.com") {
+      if (url.pathname.endsWith("/token")) {
+        assert.equal(options?.method, "POST");
+        assert.equal(
+          (options?.body as URLSearchParams).get("redirect_uri"),
+          configWithContributor.contributor?.oauth?.redirect,
+        );
+        return Response.json({ access_token: "test-oauth-access-token" });
+      }
+      if (url.pathname.endsWith("/@me")) return Response.json({ id: signedIn });
+      return Response.json([
+        { type: "github", id: account, verified: true, visibility: 0 },
+      ]);
+    }
+    githubFetches++;
+    assert.equal(url.host, "api.github.com");
+    if (url.pathname.startsWith("/user/")) {
+      assert.equal(url.pathname, `/user/${account}`);
+      return Response.json({
+        login: "contributor-renamed",
+        id: Number(account),
+        type: "User",
+      });
+    }
+    assert.equal(
+      url.searchParams.get("q"),
+      "org:PrintBench is:pr is:merged author:contributor-renamed",
+    );
+    return Response.json({
+      incomplete_results: false,
+      items: [
+        {
+          user: { id: prAuthor },
+          html_url: "https://github.com/PrintBench/printbench-docs/pull/4",
+          pull_request: { merged_at: mergedAt },
+        },
+      ],
+    });
+  };
+  const claims = contributorClaims(
+    configWithContributor,
+    store,
+    () => guild,
+    safeFetch,
+  )!;
+  function link(member: string, id: string) {
+    const authorize = new URL(claims.start(member, bot, id));
+    assert.equal(authorize.searchParams.get("scope"), "identify connections");
+    const data = new URLSearchParams({
+      state: authorize.searchParams.get("state")!,
+      code: "code",
+    });
+    return new URL(`https://benchy.example.com/oauth/discord/callback?${data}`);
+  }
+  const mismatch = link(author, "1");
+  assert.equal((await claims.complete(mismatch)).status, 403);
+  assert.equal(githubFetches, 0);
+  assert.equal((await claims.complete(mismatch)).status, 400);
+
+  signedIn = author;
+  assert.equal((await claims.complete(link(author, "2"))).status, 422);
+  assert.equal(people.get(author)?.roles.cache.has(contributorRole), false);
+  prAuthor = Number(account);
+  mergedAt = null;
+  assert.equal((await claims.complete(link(author, "3"))).status, 422);
+  mergedAt = "2026-01-01T00:00:00Z";
+  assert.equal((await claims.complete(link(author, "4"))).status, 200);
+  assert.equal(people.get(author)?.roles.cache.has(contributorRole), true);
+  assert.equal(store.nextJobs().length, 1);
+  assert.equal((await claims.complete(link(author, "5"))).status, 200);
+  assert.equal(store.nextJobs().length, 1);
+
+  signedIn = privileged;
+  assert.equal((await claims.complete(link(privileged, "6"))).status, 422);
+  assert.equal(people.get(privileged)?.roles.cache.has(contributorRole), false);
+});
+
+function rulesFlow(guild: Guild, store: Store) {
+  const handle = commandHandlers(config, store);
+  let next = 1;
+  const id = () => String(BigInt(command) + BigInt(100 + next++));
+  return {
+    async open(changes = {}) {
+      const slash = interaction(guild, "slash", {
+        id: id(),
+        commandName: "setup",
+        ...changes,
+      });
+      await handle(slash.input);
+      return slash;
+    },
+    async preview(form: string, markdown: string, continuation = "") {
+      const values = new Map([
+        ["title", "Server Rules"],
+        ["markdown", markdown],
+      ]);
+      if (continuation) values.set("continuation", continuation);
+      const modal = interaction(guild, "modal", {
+        id: id(),
+        customId: `rules:form:${form}`,
+        fields: {
+          fields: values,
+          getTextInputValue: (key: string) => values.get(key),
+        },
+      });
+      await handle(modal.input);
+      return modal;
+    },
+    async choose(preview: string, action: "publish" | "cancel" | "edit") {
+      const button = interaction(guild, "button", {
+        id: id(),
+        customId: `rules:${action}:${preview}`,
+      });
+      await handle(button.input);
+      return button;
+    },
+  };
+}
+
+test("rules require Manage Server and preview privately before stable publication", async (t) => {
+  const { store, guild, people, rulesPosts } = setup();
+  t.after(() => store.close());
+  const flow = rulesFlow(guild, store);
+  const denied = await flow.open({
+    user: { id: author },
+    member: people.get(author),
+  });
+  assert.equal(denied.output[0].flags, MessageFlags.Ephemeral);
+  assert.match(denied.output[0].content ?? "", /need Manage Server/);
+
+  const opened = await flow.open();
+  const modal = (opened.output[0] as unknown as ModalBuilder).toJSON();
+  assert.equal(modal.title, "Set up server rules");
+  const preview = await flow.preview(
+    opened.input.id,
+    "First draft",
+    "a".repeat(3998),
+  );
+  assert.equal(rulesPosts.size, 0);
+  assert.match(preview.output[0].content ?? "", /Preview/);
+  const edit = await flow.choose(preview.input.id, "edit");
+  const editForm = (edit.output[0] as unknown as ModalBuilder).toJSON();
+  assert.match(JSON.stringify(editForm), /First draft/);
+  const edited = await flow.preview(edit.input.id, "Edited draft");
+  await flow.choose(edited.input.id, "cancel");
+  assert.equal(rulesPosts.size, 0);
+
+  const large = await flow.preview(
+    (await flow.open()).input.id,
+    "a".repeat(4000),
+    "b".repeat(4000),
+  );
+  assert.equal(large.output.length, 2);
+  assert.equal(large.output[1].flags, MessageFlags.Ephemeral);
+  assert.equal(rulesPosts.size, 0);
+  const concurrent = await flow.preview(
+    (await flow.open()).input.id,
+    "An outdated draft",
+  );
+  await flow.choose(large.input.id, "publish");
+  assert.equal(rulesPosts.size, 2);
+  const [primary, secondary] = store
+    .readRules(rules)
+    .messages.map(({ id }) => id!);
+  assert.equal(rulesPosts.get(primary)?.embeds[0].description?.length, 4000);
+  assert.equal(rulesPosts.get(secondary)?.embeds[0].description?.length, 4000);
+  const stale = await flow.choose(concurrent.input.id, "publish");
+  assert.match(
+    stale.output.at(-1)?.content ?? "",
+    /changed after this preview/,
+  );
+
+  const revised = await flow.preview((await flow.open()).input.id, "New rules");
+  assert.match(
+    revised.output[0].content ?? "",
+    /removes Benchy's old continuation/,
+  );
+  await flow.choose(revised.input.id, "publish");
+  assert.deepEqual([...rulesPosts.keys()], [primary]);
+  assert.equal(rulesPosts.get(primary)?.embeds[0].description, "New rules");
+  const reopened = await flow.open();
+  assert.match(
+    JSON.stringify((reopened.output[0] as unknown as ModalBuilder).toJSON()),
+    /New rules/,
+  );
+});
+
+test("publishing after an interrupted Discord response recovers the original rules message", async (t) => {
+  const { store, guild, rulesPosts, rulesErrors } = setup();
+  t.after(() => store.close());
+  let flow = rulesFlow(guild, store);
+  const preview = await flow.preview(
+    (await flow.open()).input.id,
+    "Rules before interruption",
+  );
+  rulesErrors.push(
+    Object.assign(new Error("Connection lost"), { status: 503 }),
+  );
+  await flow.choose(preview.input.id, "publish");
+  assert.equal(rulesPosts.size, 1);
+  const [published] = [...rulesPosts.keys()];
+
+  flow = rulesFlow(guild, store);
+  const retry = await flow.preview(
+    (await flow.open()).input.id,
+    "Rules after interruption",
+  );
+  await flow.choose(retry.input.id, "publish");
+  assert.deepEqual([...rulesPosts.keys()], [published]);
+  assert.equal(
+    rulesPosts.get(published)?.embeds[0].description,
+    "Rules after interruption",
+  );
+  assert.equal(store.readRules(rules).messages[0].id, published);
 });

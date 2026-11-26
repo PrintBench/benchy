@@ -11,6 +11,35 @@ const repository = "PrintBench/printbench";
 const webhookSecret = "a-staging-test-secret-of-sufficient-length";
 const delivery = "7b68c995-85b5-43ce-af7e-7b669a6e3ab4";
 
+test("the OAuth callback uses a private response and forwards the authorization state", async (t) => {
+  const store = new Store(":memory:");
+  const server = webServer(
+    { repository, webhookSecret },
+    store,
+    () => true,
+    () => true,
+    async (url) => {
+      assert.equal(url.searchParams.get("state"), "test-state");
+      assert.equal(url.searchParams.get("code"), "test-code");
+      return { status: 200, body: "Contributor role granted.\n" };
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const response = await fetch(
+    `http://127.0.0.1:${address.port}/oauth/discord/callback?state=test-state&code=test-code`,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
+  assert.equal(await response.text(), "Contributor role granted.\n");
+});
+
 test("webhooks verify the exact body, restrict the repository, and persist a single opened event", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "benchy-webhook-"));
   const store = new Store(directory);

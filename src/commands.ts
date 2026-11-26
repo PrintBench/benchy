@@ -23,14 +23,19 @@ import type {
   MessageContextMenuCommandInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
+import { Actions } from "./actions.js";
 import { project } from "./config.js";
 import type { Config } from "./config.js";
+import { contributionUrl, grantContributor } from "./contributors.js";
+import type { contributorClaims } from "./contributors.js";
 import {
   assertBotPermissions,
   banReason,
   currentBan,
   discordCode,
   discordStatus,
+  initialSupportTag,
+  isSolvedTag,
   member,
   quiet,
   staffChannel,
@@ -40,11 +45,16 @@ import {
 } from "./discord.js";
 import { errorDetails, log } from "./log.js";
 import { channelOverwrites, coversSupportAudience } from "./permissions.js";
+import { rulesCommands, setupCommand } from "./rules.js";
 import type { Ban, Store } from "./store.js";
 
 const {
+  Administrator,
   BanMembers,
+  KickMembers,
+  ModerateMembers,
   ManageMessages,
+  ManageRoles,
   ManageThreads,
   SendMessages,
   SendMessagesInThreads,
@@ -53,26 +63,120 @@ const {
   ReadMessageHistory,
 } = PermissionFlagsBits;
 
+const moderation = {
+  ban: {
+    permission: BanMembers,
+    label: "Ban",
+    description: "Ban a member and record the reason",
+    done: "Member banned.",
+  },
+  kick: {
+    permission: KickMembers,
+    label: "Kick",
+    description: "Kick a member and record the reason",
+    done: "Member kicked.",
+  },
+  timeout: {
+    permission: ModerateMembers,
+    label: "Timeout",
+    description: "Temporarily prevent a member from participating",
+    done: "Member timed out.",
+  },
+  untimeout: {
+    permission: ModerateMembers,
+    label: "Remove timeout",
+    description: "Remove a member's timeout",
+    done: "Member timeout removed.",
+  },
+} as const;
+
+type Action = keyof typeof moderation;
+type PendingAction = Ban & { action: Action; minutes?: number };
+const maxTimeoutMinutes = 28 * 24 * 60;
+
+function moderationCommand(action: Action) {
+  const details = moderation[action];
+  const builder = new SlashCommandBuilder()
+    .setName(action)
+    .setDescription(details.description)
+    .setDefaultMemberPermissions(details.permission);
+  builder.addUserOption((option) =>
+    option
+      .setName("member")
+      .setDescription("Member to moderate")
+      .setRequired(true),
+  );
+  if (action === "timeout")
+    builder.addIntegerOption((option) =>
+      option
+        .setName("minutes")
+        .setDescription("Timeout duration in minutes (up to 28 days)")
+        .setMinValue(1)
+        .setMaxValue(maxTimeoutMinutes)
+        .setRequired(true),
+    );
+  return builder.addStringOption((option) =>
+    option
+      .setName("reason")
+      .setDescription("Reason for the moderation log")
+      .setRequired(true)
+      .setMaxLength(300),
+  );
+}
+
 export const commands = [
+  setupCommand,
   new SlashCommandBuilder()
     .setName("info")
     .setDescription("Share the official PrintBench links"),
+  moderationCommand("ban"),
+  moderationCommand("kick"),
+  moderationCommand("timeout"),
+  moderationCommand("untimeout"),
   new SlashCommandBuilder()
-    .setName("ban")
-    .setDescription("Ban a member and record the reason")
-    .setDefaultMemberPermissions(BanMembers)
-    .addUserOption((option) =>
+    .setName("resolve")
+    .setDescription("Set or clear the Solved tag on this Support post")
+    .setDefaultMemberPermissions(ManageThreads)
+    .addBooleanOption((option) =>
       option
-        .setName("member")
-        .setDescription("Member to ban")
-        .setRequired(true),
+        .setName("solved")
+        .setDescription("Set to false to clear the Solved tag"),
+    ),
+  new SlashCommandBuilder()
+    .setName("contributor")
+    .setDescription("Recognize PrintBench contributors")
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("claim")
+        .setDescription(
+          "Claim Contributor using a verified GitHub connection and a merged pull request",
+        ),
     )
-    .addStringOption((option) =>
-      option
-        .setName("reason")
-        .setDescription("Reason for the moderation log")
-        .setRequired(true)
-        .setMaxLength(300),
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("grant")
+        .setDescription(
+          "Grant Contributor for a verified contribution (moderators only)",
+        )
+        .addUserOption((option) =>
+          option
+            .setName("member")
+            .setDescription("Member who contributed")
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("evidence")
+            .setDescription("Link to the contribution on GitHub")
+            .setRequired(true)
+            .setMaxLength(450),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("reason")
+            .setDescription("Context for the private moderation log")
+            .setMaxLength(300),
+        ),
     ),
   new SlashCommandBuilder()
     .setName("lock")
@@ -106,26 +210,6 @@ type Selected = {
   attachments: boolean;
 };
 
-class Actions<T> {
-  private items = new Map<string, { action: T; expires: NodeJS.Timeout }>();
-
-  add(id: string, action: T) {
-    const expires = setTimeout(() => this.items.delete(id), 5 * 60_000);
-    expires.unref();
-    this.items.set(id, { action, expires });
-  }
-
-  get(id: string) {
-    return this.items.get(id)?.action;
-  }
-
-  remove(id: string) {
-    const item = this.items.get(id);
-    if (item) clearTimeout(item.expires);
-    this.items.delete(id);
-  }
-}
-
 function requireMod(config: Config, moderator: GuildMember) {
   if (
     moderator.id !== moderator.guild.ownerId &&
@@ -135,17 +219,25 @@ function requireMod(config: Config, moderator: GuildMember) {
   }
 }
 
-function canBan(bot: GuildMember, moderator: GuildMember, target: GuildMember) {
+function canModerate(
+  action: Action,
+  bot: GuildMember,
+  moderator: GuildMember,
+  target: GuildMember,
+) {
   const owner = moderator.guild.ownerId;
+  const permission = moderation[action].permission;
   return (
-    moderator.permissions.has(BanMembers) &&
+    moderator.permissions.has(permission) &&
     target.id !== owner &&
     target.id !== bot.id &&
     target.id !== moderator.id &&
     (moderator.id === owner ||
       moderator.roles.highest.comparePositionTo(target.roles.highest) > 0) &&
-    bot.permissions.has(BanMembers) &&
-    bot.roles.highest.comparePositionTo(target.roles.highest) > 0
+    bot.permissions.has(permission) &&
+    bot.roles.highest.comparePositionTo(target.roles.highest) > 0 &&
+    (permission !== ModerateMembers ||
+      (!target.permissions.has(Administrator) && !target.user.bot))
   );
 }
 
@@ -226,10 +318,15 @@ async function recoverSupportThread(
   }
 }
 
-export function commandHandlers(config: Config, store: Store) {
+export function commandHandlers(
+  config: Config,
+  store: Store,
+  claims?: ReturnType<typeof contributorClaims>,
+) {
   const selections = new Actions<Selected>();
-  const confirmations = new Actions<Ban>();
+  const confirmations = new Actions<PendingAction>();
   const creatingSupport = new Set<string>();
+  const rules = rulesCommands(config, store);
 
   async function beginSupport(
     interaction: MessageContextMenuCommandInteraction<"cached">,
@@ -384,7 +481,7 @@ export function commandHandlers(config: Config, store: Store) {
         .filter(Boolean)
         .join("\n\n");
       const tag = forum.flags.has("RequireTag")
-        ? forum.availableTags.find((entry) => !entry.moderated)
+        ? initialSupportTag(forum)
         : undefined;
       if (forum.flags.has("RequireTag") && !tag)
         throw new UserError("The Support forum needs an available tag.");
@@ -417,57 +514,82 @@ export function commandHandlers(config: Config, store: Store) {
     }
   }
 
-  async function beginBan(interaction: ChatInputCommandInteraction<"cached">) {
+  async function beginModeration(
+    interaction: ChatInputCommandInteraction<"cached">,
+    action: Action,
+  ) {
     requireMod(config, interaction.member);
-    if (!interaction.memberPermissions.has(BanMembers))
-      throw new UserError("You need Ban Members.");
+    const { permission, label } = moderation[action];
+    if (!interaction.memberPermissions.has(permission))
+      throw new UserError(
+        `You do not have Discord permission to ${label.toLowerCase()} a member.`,
+      );
     const reason = interaction.options.getString("reason", true).trim();
     if (!reason) throw new UserError("Enter a reason for the moderation log.");
+    const minutes =
+      action === "timeout"
+        ? interaction.options.getInteger("minutes", true)
+        : undefined;
+    if (
+      minutes !== undefined &&
+      (!Number.isInteger(minutes) || minutes < 1 || minutes > maxTimeoutMinutes)
+    )
+      throw new UserError("Choose a timeout between one minute and 28 days.");
     const target = interaction.options.getUser("member", true);
-    const ban: Ban = {
+    const pending: PendingAction = {
       id: interaction.id,
       moderator: interaction.user.id,
       target: target.id,
       reason,
       created: Date.now(),
+      action,
+      minutes,
     };
-    confirmations.add(ban.id, ban);
+    confirmations.add(pending.id, pending);
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setStyle(ButtonStyle.Danger)
-        .setLabel("Confirm ban")
-        .setCustomId(`ban-confirm:${ban.id}`),
+        .setLabel("Confirm")
+        .setCustomId(`${action}-confirm:${pending.id}`),
       new ButtonBuilder()
         .setStyle(ButtonStyle.Secondary)
         .setLabel("Cancel")
-        .setCustomId(`ban-cancel:${ban.id}`),
+        .setCustomId(`${action}-cancel:${pending.id}`),
     );
     await interaction.reply({
-      content: `Ban <@${target.id}> (\`${target.id}\`)?\nReason: ${escapeMarkdown(reason)}`,
+      content: `${label} <@${target.id}> (\`${target.id}\`)${minutes ? ` for ${minutes} minutes` : ""}?\nReason: ${escapeMarkdown(reason)}`,
       components: [buttons],
       flags: MessageFlags.Ephemeral,
       allowedMentions: quiet,
     });
   }
 
-  async function finishBan(
+  async function finishModeration(
     interaction: ButtonInteraction<"cached">,
     id: string,
+    action: Action,
     confirm: boolean,
   ) {
-    const ban = confirmations.get(id);
-    if (!ban || ban.moderator !== interaction.user.id)
-      throw new UserError("This ban confirmation has expired.");
+    const pending = confirmations.get(id);
+    if (
+      !pending ||
+      pending.action !== action ||
+      pending.moderator !== interaction.user.id
+    )
+      throw new UserError("This moderation confirmation has expired.");
     confirmations.remove(id);
     if (!confirm) {
-      await interaction.update({ content: "Ban cancelled.", components: [] });
+      await interaction.update({
+        content: `${moderation[action].label} cancelled.`,
+        components: [],
+      });
       return;
     }
     await interaction.deferUpdate();
     const guild = interaction.guild;
     const [moderator, target, bot, audit] = await Promise.all([
-      member(guild, ban.moderator),
-      member(guild, ban.target).catch((error) => {
+      member(guild, pending.moderator),
+      member(guild, pending.target).catch((error) => {
         if (discordCode(error) === 10007)
           throw new UserError("The target is no longer a guild member.");
         throw error;
@@ -477,9 +599,9 @@ export function commandHandlers(config: Config, store: Store) {
       guild.roles.fetch(),
     ]);
     requireMod(config, moderator);
-    if (!canBan(bot, moderator, target))
+    if (!canModerate(action, bot, moderator, target))
       throw new UserError(
-        "You or Benchy cannot ban that member. Check the role hierarchy.",
+        "You or Benchy cannot moderate that member. Check Discord permissions and the role hierarchy.",
       );
     assertBotPermissions(audit, bot, [
       ViewChannel,
@@ -487,9 +609,38 @@ export function commandHandlers(config: Config, store: Store) {
       ReadMessageHistory,
       EmbedLinks,
     ]);
+    if (action !== "ban") {
+      const reason = `Benchy | Moderator ${pending.moderator} | ${pending.reason.toWellFormed()}`;
+      const created = Date.now();
+      const until =
+        pending.minutes === undefined
+          ? undefined
+          : created + pending.minutes * 60_000;
+      if (action === "kick") await target.kick(reason);
+      else await target.disableCommunicationUntil(until ?? null, reason);
+      store.recordMemberAudit(id, {
+        action,
+        moderator: pending.moderator,
+        target: pending.target,
+        reason: pending.reason,
+        created,
+        until,
+      });
+      await interaction.editReply({
+        content: `${moderation[action].done} The audit entry is queued.`,
+        components: [],
+      });
+      return;
+    }
     if (await currentBan(guild, target.id))
       throw new UserError("That member is already banned.");
-    ban.created = Date.now();
+    const ban: Ban = {
+      id,
+      moderator: pending.moderator,
+      target: pending.target,
+      reason: pending.reason,
+      created: Date.now(),
+    };
     if (!store.reserveBan(ban))
       throw new UserError(
         "Benchy is already processing a ban for this member.",
@@ -520,15 +671,11 @@ export function commandHandlers(config: Config, store: Store) {
     });
   }
 
-  async function setLock(
+  async function moderatedPost(
     interaction: ChatInputCommandInteraction<"cached">,
-    locked: boolean,
+    channelId: string,
   ) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const guild = interaction.guild;
-    const post = locked ? null : interaction.options.getString("post");
-    const channelId =
-      post === null ? interaction.channelId : postId(post, guild.id);
     const [channel, moderator] = await Promise.all([
       guild.channels.fetch(channelId, { force: true }),
       member(guild, interaction.user.id),
@@ -548,6 +695,20 @@ export function commandHandlers(config: Config, store: Store) {
       ViewChannel,
       ManageThreads,
     ]);
+    return { channel, parent, moderator };
+  }
+
+  async function setLock(
+    interaction: ChatInputCommandInteraction<"cached">,
+    locked: boolean,
+  ) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const post = locked ? null : interaction.options.getString("post");
+    const channelId =
+      post === null
+        ? interaction.channelId
+        : postId(post, interaction.guild.id);
+    const { channel, moderator } = await moderatedPost(interaction, channelId);
     if (channel.locked !== locked || channel.archived !== locked) {
       if (locked && channel.archived) await channel.setArchived(false);
       await channel.edit({
@@ -561,12 +722,111 @@ export function commandHandlers(config: Config, store: Store) {
     );
   }
 
+  async function resolve(interaction: ChatInputCommandInteraction<"cached">) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const { channel, parent, moderator } = await moderatedPost(
+      interaction,
+      interaction.channelId,
+    );
+    if (parent.id !== config.support)
+      throw new UserError("Run this in a post in the Support forum.");
+    const tag = parent.availableTags.filter(isSolvedTag);
+    if (tag.length !== 1)
+      throw new UserError("The Support forum needs one tag named Solved.");
+    const solved = interaction.options.getBoolean("solved") ?? true;
+    const current = channel.appliedTags;
+    if (current.includes(tag[0].id) !== solved) {
+      if (channel.archived)
+        throw new UserError(
+          "Reopen the Support post before changing its tags.",
+        );
+      if (solved && current.length >= 5)
+        throw new UserError(
+          "Remove one existing tag before marking this post as solved.",
+        );
+      const tags = solved
+        ? [...current, tag[0].id]
+        : current.filter((id) => id !== tag[0].id);
+      await channel.setAppliedTags(
+        tags,
+        `${solved ? "Marked solved" : "Cleared Solved tag"} by ${moderator.id}`,
+      );
+    }
+    await interaction.editReply(
+      solved ? "Support post marked as solved." : "Solved tag removed.",
+    );
+  }
+
+  async function contributor(
+    interaction: ChatInputCommandInteraction<"cached">,
+  ) {
+    if (!config.contributor)
+      throw new UserError("The Contributor role has not been configured.");
+    if (interaction.options.getSubcommand() === "claim") {
+      if (!claims)
+        throw new UserError(
+          "Ask a PrintBench moderator to verify your contribution and grant the Contributor role.",
+        );
+      if (interaction.member.pending)
+        throw new UserError(
+          "Complete the server rules screening before claiming Contributor.",
+        );
+      const url = claims.start(
+        interaction.user.id,
+        interaction.applicationId,
+        interaction.id,
+      );
+      const button = new ButtonBuilder()
+        .setStyle(ButtonStyle.Link)
+        .setURL(url)
+        .setLabel("Verify with Discord");
+      await interaction.reply({
+        content:
+          "Connect GitHub in your Discord Connections settings, then authorize Benchy to check that account for a merged pull request. This link is valid for up to five minutes.",
+        components: [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(button),
+        ],
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    requireMod(config, interaction.member);
+    if (!interaction.memberPermissions.has(ManageRoles))
+      throw new UserError("You need Manage Roles to grant Contributor.");
+    const evidence = contributionUrl(
+      interaction.options.getString("evidence", true),
+      config.repository.split("/")[0],
+    );
+    const reason =
+      interaction.options.getString("reason")?.trim() ||
+      "Contribution verified by a moderator";
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const moderator = await member(interaction.guild, interaction.user.id);
+    requireMod(config, moderator);
+    const granted = await grantContributor(interaction.guild, config, store, {
+      id: interaction.id,
+      target: interaction.options.getUser("member", true).id,
+      moderator,
+      reason,
+      evidence: evidence.href,
+    });
+    await interaction.editReply(
+      granted
+        ? "Contributor role granted. The audit entry is queued."
+        : "That member already has Contributor.",
+    );
+  }
+
   return async function handle(interaction: import("discord.js").Interaction) {
     if (!interaction.inCachedGuild() || interaction.guildId !== config.guild)
       return;
     try {
       if (interaction.isChatInputCommand()) {
         switch (interaction.commandName) {
+          case "setup":
+            await rules.open(interaction);
+            break;
           case "info":
             await interaction.reply({
               embeds: [info()],
@@ -574,7 +834,16 @@ export function commandHandlers(config: Config, store: Store) {
             });
             break;
           case "ban":
-            await beginBan(interaction);
+          case "kick":
+          case "timeout":
+          case "untimeout":
+            await beginModeration(interaction, interaction.commandName);
+            break;
+          case "resolve":
+            await resolve(interaction);
+            break;
+          case "contributor":
+            await contributor(interaction);
             break;
           case "lock":
           case "unlock":
@@ -588,6 +857,16 @@ export function commandHandlers(config: Config, store: Store) {
         await beginSupport(interaction);
       } else if (
         interaction.isModalSubmit() &&
+        interaction.customId.startsWith("rules:form:")
+      ) {
+        await rules.preview(interaction);
+      } else if (
+        interaction.isButton() &&
+        interaction.customId.startsWith("rules:")
+      ) {
+        await rules.button(interaction);
+      } else if (
+        interaction.isModalSubmit() &&
         interaction.customId.startsWith("support:")
       ) {
         await finishSupport(
@@ -595,9 +874,17 @@ export function commandHandlers(config: Config, store: Store) {
           interaction.customId.slice("support:".length),
         );
       } else if (interaction.isButton()) {
-        const [action, id] = interaction.customId.split(":");
-        if (id && (action === "ban-confirm" || action === "ban-cancel")) {
-          await finishBan(interaction, id, action === "ban-confirm");
+        const match =
+          /^(ban|kick|timeout|untimeout)-(confirm|cancel):([\d]+)$/.exec(
+            interaction.customId,
+          );
+        if (match) {
+          await finishModeration(
+            interaction,
+            match[3],
+            match[1] as Action,
+            match[2] === "confirm",
+          );
         }
       }
     } catch (error) {

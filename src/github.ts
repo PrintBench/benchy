@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import type { Config } from "./config.js";
+import { contributorCallback } from "./config.js";
 import { errorDetails, log } from "./log.js";
 import type { Release, Store } from "./store.js";
 
@@ -87,6 +88,7 @@ export function webServer(
   store: Store,
   ready: () => boolean,
   enabled: () => boolean,
+  claim?: (url: URL) => Promise<{ status: number; body: string }>,
 ) {
   const server = createServer(
     { requestTimeout: 10000, headersTimeout: 5000 },
@@ -98,6 +100,17 @@ export function webServer(
       }
 
       try {
+        if (
+          claim &&
+          request.method === "GET" &&
+          request.url?.split("?")[0] === contributorCallback
+        ) {
+          response.setHeader("Cache-Control", "no-store");
+          response.setHeader("Referrer-Policy", "no-referrer");
+          if (!enabled()) return end(503);
+          const result = await claim(new URL(request.url, "http://localhost"));
+          return end(result.status, result.body);
+        }
         if (request.method === "GET" && request.url === "/health")
           return end(200, "ok\n");
         if (request.method === "GET" && request.url === "/ready") {

@@ -10,6 +10,7 @@ import type {
   Guild,
   GuildMember,
   GuildTextBasedChannel,
+  Message,
   MessageCreateOptions,
 } from "discord.js";
 import type { Config } from "./config.js";
@@ -89,6 +90,16 @@ export async function supportForum(guild: Guild, id: string) {
   return forum;
 }
 
+export function isSolvedTag(tag: { name: string }) {
+  return tag.name.trim().toLowerCase() === "solved";
+}
+
+export function initialSupportTag(
+  forum: Awaited<ReturnType<typeof supportForum>>,
+) {
+  return forum.availableTags.find((tag) => !tag.moderated && !isSolvedTag(tag));
+}
+
 export async function staffChannel(
   guild: Guild,
   config: Config,
@@ -149,10 +160,7 @@ export async function validateGuild(guild: Guild, config: Config) {
     ReadMessageHistory,
     ManageThreads,
   ]);
-  if (
-    forum.flags.has("RequireTag") &&
-    !forum.availableTags.some((tag) => !tag.moderated)
-  ) {
+  if (forum.flags.has("RequireTag") && !initialSupportTag(forum)) {
     throw new UserError(
       "The Support forum needs an available non-moderated tag or optional tags.",
     );
@@ -284,6 +292,37 @@ function announcement(config: Config, job: Job): Announcement {
           )
           .setTimestamp(new Date(job.ban.created)),
       };
+    case "member-audit": {
+      const entry = job.entry;
+      const title = {
+        kick: "Member kicked",
+        timeout: "Member timed out",
+        untimeout: "Member timeout removed",
+        contributor: "Contributor role granted",
+      }[entry.action];
+      const embed = new EmbedBuilder()
+        .setTitle(title)
+        .addFields(
+          {
+            name: "Requested by",
+            value: `<@${entry.moderator}> (\`${entry.moderator}\`)`,
+          },
+          { name: "Member", value: `<@${entry.target}> (\`${entry.target}\`)` },
+          { name: "Reason", value: escapeMarkdown(entry.reason) },
+        )
+        .setTimestamp(new Date(entry.created));
+      if (entry.until)
+        embed.addFields({
+          name: "Ends",
+          value: `<t:${Math.floor(entry.until / 1000)}:F>`,
+        });
+      if (entry.evidence)
+        embed.addFields({
+          name: "GitHub contribution",
+          value: `<${entry.evidence}>`,
+        });
+      return { embed };
+    }
     case "redirect":
       return {
         embed: new EmbedBuilder().setDescription(
@@ -294,11 +333,10 @@ function announcement(config: Config, job: Job): Announcement {
   }
 }
 
-async function findDelivery(
+export async function findRecentMessage(
   channel: GuildTextBasedChannel,
-  bot: string,
-  marker: string,
   since: number,
+  matches: (message: Message) => boolean,
 ) {
   let before: string | undefined;
   for (;;) {
@@ -307,18 +345,11 @@ async function findDelivery(
       before,
       cache: false,
     });
-    const existing = messages.find(
-      (message) =>
-        message.author.id === bot &&
-        message.embeds.some((embed) => embed.footer?.text === marker),
-    );
-    if (existing) return existing.id;
+    const threshold = since - 5_000;
+    const existing = messages.find(matches);
+    if (existing) return existing;
     const oldest = messages.last();
-    if (
-      !oldest ||
-      messages.size < 100 ||
-      oldest.createdTimestamp < since - 5_000
-    )
+    if (!oldest || messages.size < 100 || oldest.createdTimestamp < threshold)
       return null;
     before = oldest.id;
   }
@@ -348,8 +379,13 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           break;
         }
         case "audit":
+        case "member-audit":
         case "activity":
-          channel = await staffChannel(guild, config, job.kind);
+          channel = await staffChannel(
+            guild,
+            config,
+            job.kind === "activity" ? "activity" : "audit",
+          );
           break;
         case "release":
           channel = await textChannel(guild, config.releases);
@@ -380,14 +416,15 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
         .slice(0, 24);
       const marker = `Benchy • ${nonce}`;
       if (row.first_attempt !== null) {
-        const existing = await findDelivery(
+        const existing = await findRecentMessage(
           channel,
-          guild.client.user.id,
-          marker,
           row.first_attempt,
+          (message) =>
+            message.author.id === guild.client.user.id &&
+            message.embeds.some((embed) => embed.footer?.text === marker),
         );
         if (existing) {
-          store.sent(row.id, existing);
+          store.sent(row.id, existing.id);
           continue;
         }
       }

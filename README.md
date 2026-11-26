@@ -1,34 +1,60 @@
 # Benchy
 
-Benchy is the PrintBench Discord bot. It announces releases, posts newly opened GitHub issues and pull requests, welcomes new members, and gives moderators tools to route support questions, ban members, and close forum posts.
+Benchy is the PrintBench Discord bot. It announces releases, posts newly opened GitHub issues and pull requests, welcomes new members, and gives moderators tools to run the Support forum, moderate members, and recognize contributors.
 
-| Command                    | What it does                                                                                                         |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `/info`                    | Shares official PrintBench links with the channel.                                                                   |
-| **Apps → Send to Support** | Creates an attributed forum post from a selected message and replies with the new link.                              |
-| `/ban member reason`       | Privately confirms a ban and queues an audit entry after Discord accepts it.                                         |
-| `/lock`                    | Locks and archives the current forum post.                                                                           |
-| `/unlock [post]`           | Reopens a forum post. Run it in another channel with the post URL or ID if the archived post cannot accept commands. |
+| Command                                       | What it does                                                                                                         |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `/setup rules`                                | Opens a private Markdown preview and publishes to the configured rules channel.                                      |
+| `/info`                                       | Shares official PrintBench links with the channel.                                                                   |
+| **Apps → Send to Support**                    | Creates an attributed forum post from a selected message and replies with the new link.                              |
+| `/ban member reason`                          | Privately confirms a ban and queues an audit entry after Discord accepts it.                                         |
+| `/kick member reason`                         | Privately confirms a kick and queues an audit entry.                                                                 |
+| `/timeout member minutes reason`              | Privately confirms a timeout of 1 minute to 28 days and queues an audit entry.                                       |
+| `/untimeout member reason`                    | Privately confirms removal of a timeout and queues an audit entry.                                                   |
+| `/resolve [solved]`                           | Marks an active Support post as Solved. Use `solved:false` to clear the tag.                                         |
+| `/contributor claim`                          | Checks a verified GitHub connection for a merged PR in the PrintBench organization.                                  |
+| `/contributor grant member evidence [reason]` | Lets a moderator recognize a contribution after reviewing the evidence.                                              |
+| `/lock`                                       | Locks and archives the current forum post.                                                                           |
+| `/unlock [post]`                              | Reopens a forum post. Run it in another channel with the post URL or ID if the archived post cannot accept commands. |
 
 ## Discord setup
 
 1. Create a Discord application and bot named **Benchy** for the server. In the Developer Portal, enable **Server Members Intent**. Install as a server app with the `bot` and `applications.commands` scopes. Restrict installation to administrators you trust.
-2. Give Benchy **Ban Members** and put its role above members it needs to ban, below protected staff roles. Do not grant Administrator. Configure the staff roles in `DISCORD_MODERATOR_ROLE_IDS`. A moderator also needs **Ban Members**, **Manage Threads**, or **Manage Messages** in the relevant context.
+2. Give Benchy **Ban Members**, **Kick Members**, and **Timeout Members**, which the Discord API calls **Moderate Members**. Put its role above members it needs to moderate and below protected staff roles. Configure staff roles in `DISCORD_MODERATOR_ROLE_IDS`. Moderators need the corresponding Discord permission for each command, including **Manage Threads** for forum tags and **Manage Messages** for Support redirects.
 3. Configure channels and channel overrides using the table below. Reuse existing channels where suitable. Use Developer Mode to copy IDs into the environment. Variables ending in `_IDS` take comma-separated IDs.
 
 | Channel                 | Channel settings                                                                                                                                                                                                                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `#releases`             | Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Keep `Release Pings` unmentionable by members and grant Benchy **Mention @everyone, @here, and All Roles** only in this channel. Benchy only allows the configured release-role mention here.                                   |
 | `#github-activity`      | Deny View Channel to `@everyone`. Allow it for the GitHub Activity role, Benchy's bot role, and any configured staff roles that should see the feed. Add the GitHub Activity role as an optional Community Onboarding choice. Give Benchy Send Messages, Embed Links, and Read Message History.                 |
-| `#support`              | Use a forum. Give Benchy View Channel, Send Messages, Read Message History, and Manage Threads. Give intended members View Channel and Send Messages in Threads. If a tag is required, Benchy uses the first non-moderated tag in the forum tag order.                                                          |
+| `#support`              | Use a forum and create one moderator-only tag named **Solved**. Give Benchy View Channel, Send Messages, Read Message History, and Manage Threads. Give intended members View Channel and Send Messages in Threads. If a tag is required, Benchy uses the first available non-moderated tag other than Solved.  |
 | Support source channels | Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Use text channels with universal view and message history, or channels with the same view overwrites as Support and universal message history. Benchy checks these permissions and the original author's access before copying. |
 | `#mod-log`              | Deny View Channel to `@everyone`, and allow it for only Benchy's bot role and configured staff roles. Give Benchy Send Messages, Embed Links, and Read Message History. Server administrators retain Discord's inherent access.                                                                                 |
+| `#rules`                | Set `DISCORD_RULES_CHANNEL_ID`. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History so it can publish and update its rules posts.                                                                                                                                                    |
 | `#welcome`              | Make it visible to new members after screening. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Set the rules channel ID for the greeting link.                                                                                                                                 |
 | Other forums            | Grant Benchy View Channel and Manage Threads wherever staff should be able to use `/lock` and `/unlock`.                                                                                                                                                                                                        |
 
 Turn off Discord's built-in system-channel join messages if they duplicate the new greeting. Leave your existing Community Onboarding questions and release role options in place.
 
 [Discord application setup](https://docs.discord.com/developers/quick-start/getting-started) · [Discord Community Onboarding](https://support.discord.com/hc/en-us/articles/11074987197975-Community-Onboarding-FAQ)
+
+## Publish the rules
+
+Run `/setup rules` with **Manage Server** and access to the rules channel. Enter an embed title and paste Markdown into the first field. Use the optional second field for longer rules. Each field accepts up to 4,000 characters. Benchy splits longer text into embeds, using section or paragraph breaks where possible. It previews separate Discord messages when the combined embed text exceeds the 6,000-character limit for a single message.
+
+Use **Edit**, **Publish**, or **Cancel** from the private preview. The first publish creates a Benchy-managed rules post that you can pin. Later publishes update it in place with pings suppressed, so links to the primary message stay valid. When a shorter version fits in one message, the preview indicates that publishing removes Benchy's previous continuation.
+
+[Discord embed limits](https://docs.discord.com/developers/resources/message#embed-limits)
+
+## Contributor recognition
+
+Create a cosmetic **Contributor** role with all guild permissions off and keep it below Benchy's role. Give Benchy **Manage Roles** and set `DISCORD_CONTRIBUTOR_ROLE_ID`. Moderators with **Manage Roles** above Contributor can grant it after reviewing a link to work in any repository in the organization. This covers issues, reviews, co-authored or direct commits, and other contributions where a moderator can verify the credit. Grants are recorded in `#mod-log`.
+
+To enable self-service, set `BENCHY_PUBLIC_URL` to the HTTPS origin serving Benchy. Under **OAuth2** in the same Discord application, register that origin followed by `/oauth/discord/callback` as a redirect URL. Set its client secret as `DISCORD_OAUTH_CLIENT_SECRET` in Coolify. Exclude OAuth callback query strings from proxy access logs.
+
+A member connects GitHub in Discord's **Connections** settings and runs `/contributor claim`. Benchy checks the verified account for a merged public pull request in any repository under the owner of `GITHUB_REPOSITORY`, which defaults to the PrintBench organization. This covers code, docs, and other merged changes. Benchy saves the two account IDs to keep each verified association unique. Benchy uses the OAuth access token in memory for that verification request.
+
+[Discord OAuth2](https://docs.discord.com/developers/topics/oauth2) · [GitHub pull request search](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
 
 ## Deploy on Coolify
 
@@ -47,6 +73,9 @@ Turn off Discord's built-in system-channel join messages if they duplicate the n
 - Open an issue and pull request. Confirm the embeds are visible to an opted-in regular member and hidden from one without the role. Redeliver a successful webhook and verify it does not post twice. Confirm an incorrect signature gets `401`.
 - Route a message with an attachment from an allowed channel. Check the excerpt, author, both links, and repeat routing. Try it from a restricted source or with a member who cannot reply in Support. Lock the new post, confirm regular members cannot reopen it, then use `/unlock post:<link>`.
 - Cancel a ban, then confirm a ban on a disposable test member. Try a target above the moderator or Benchy in the hierarchy. Confirm the private audit entry and Discord audit reason, and check that message history survives. A delivery queued before a Discord interruption should appear once service is restored.
+- Preview a long rules post, cancel it, then publish it. Edit it down to one message and check that the primary message link stays the same and the continuation is removed.
+- Mark a Support post solved and then clear the tag. Check that its other tags remain. Confirm a timeout, remove it, then kick a disposable test member. Check all three entries in the private moderation log.
+- Test a Contributor claim with a linked GitHub account that authored a merged PR in a test organization and with an account that has no merged PR there. Grant Contributor manually using an issue or review link and confirm the audit entry.
 - Join as a test member with screening enabled and verify the welcome arrives after acceptance. Repeat with screening off. Check that a rejoin gets a new welcome and open all `/info` links.
 
 ## Operate Benchy
@@ -74,4 +103,4 @@ Copy `.env.example` to `.env` for local development and use test-server IDs and 
 
 ## Follow-ups
 
-A **Solved** tag and `/resolve` command would make answered Support questions easy to find. Support forum guidelines can ask for the PrintBench version, deployment method, steps tried, and redacted logs. Discord's native AutoMod can catch mention spam and alert a private staff channel. [PrintBench support guidance](https://github.com/PrintBench/printbench/blob/main/SUPPORT.md) · [Discord AutoMod](https://support.discord.com/hc/en-us/articles/4421269296535-AutoMod-FAQ)
+Support forum guidelines can ask for the PrintBench version, deployment method, steps tried, and redacted logs. Discord's native AutoMod can catch mention spam and alert a private staff channel. [PrintBench support guidance](https://github.com/PrintBench/printbench/blob/main/SUPPORT.md) · [Discord AutoMod](https://support.discord.com/hc/en-us/articles/4421269296535-AutoMod-FAQ)
