@@ -23,6 +23,7 @@ import type {
   MessageContextMenuCommandInteraction,
   ModalSubmitInteraction,
 } from "discord.js";
+import { Actions } from "./actions.js";
 import { project } from "./config.js";
 import type { Config } from "./config.js";
 import { contributionUrl, grantContributor } from "./contributors.js";
@@ -44,6 +45,7 @@ import {
 } from "./discord.js";
 import { errorDetails, log } from "./log.js";
 import { channelOverwrites, coversSupportAudience } from "./permissions.js";
+import { rulesCommands, setupCommand } from "./rules.js";
 import type { Ban, Store } from "./store.js";
 
 const {
@@ -123,6 +125,7 @@ function moderationCommand(action: Action) {
 }
 
 export const commands = [
+  setupCommand,
   new SlashCommandBuilder()
     .setName("info")
     .setDescription("Share the official PrintBench links"),
@@ -206,26 +209,6 @@ type Selected = {
   edited: number | null;
   attachments: boolean;
 };
-
-class Actions<T> {
-  private items = new Map<string, { action: T; expires: NodeJS.Timeout }>();
-
-  add(id: string, action: T) {
-    const expires = setTimeout(() => this.items.delete(id), 5 * 60_000);
-    expires.unref();
-    this.items.set(id, { action, expires });
-  }
-
-  get(id: string) {
-    return this.items.get(id)?.action;
-  }
-
-  remove(id: string) {
-    const item = this.items.get(id);
-    if (item) clearTimeout(item.expires);
-    this.items.delete(id);
-  }
-}
 
 function requireMod(config: Config, moderator: GuildMember) {
   if (
@@ -343,6 +326,7 @@ export function commandHandlers(
   const selections = new Actions<Selected>();
   const confirmations = new Actions<PendingAction>();
   const creatingSupport = new Set<string>();
+  const rules = rulesCommands(config, store);
 
   async function beginSupport(
     interaction: MessageContextMenuCommandInteraction<"cached">,
@@ -840,6 +824,9 @@ export function commandHandlers(
     try {
       if (interaction.isChatInputCommand()) {
         switch (interaction.commandName) {
+          case "setup":
+            await rules.open(interaction);
+            break;
           case "info":
             await interaction.reply({
               embeds: [info()],
@@ -868,6 +855,16 @@ export function commandHandlers(
         interaction.commandName === "Send to Support"
       ) {
         await beginSupport(interaction);
+      } else if (
+        interaction.isModalSubmit() &&
+        interaction.customId.startsWith("rules:form:")
+      ) {
+        await rules.preview(interaction);
+      } else if (
+        interaction.isButton() &&
+        interaction.customId.startsWith("rules:")
+      ) {
+        await rules.button(interaction);
       } else if (
         interaction.isModalSubmit() &&
         interaction.customId.startsWith("support:")

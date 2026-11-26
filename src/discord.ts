@@ -10,6 +10,7 @@ import type {
   Guild,
   GuildMember,
   GuildTextBasedChannel,
+  Message,
   MessageCreateOptions,
 } from "discord.js";
 import type { Config } from "./config.js";
@@ -332,11 +333,10 @@ function announcement(config: Config, job: Job): Announcement {
   }
 }
 
-async function findDelivery(
+export async function findRecentMessage(
   channel: GuildTextBasedChannel,
-  bot: string,
-  marker: string,
   since: number,
+  matches: (message: Message) => boolean,
 ) {
   let before: string | undefined;
   for (;;) {
@@ -345,18 +345,11 @@ async function findDelivery(
       before,
       cache: false,
     });
-    const existing = messages.find(
-      (message) =>
-        message.author.id === bot &&
-        message.embeds.some((embed) => embed.footer?.text === marker),
-    );
-    if (existing) return existing.id;
+    const threshold = since - 5_000;
+    const existing = messages.find(matches);
+    if (existing) return existing;
     const oldest = messages.last();
-    if (
-      !oldest ||
-      messages.size < 100 ||
-      oldest.createdTimestamp < since - 5_000
-    )
+    if (!oldest || messages.size < 100 || oldest.createdTimestamp < threshold)
       return null;
     before = oldest.id;
   }
@@ -423,14 +416,15 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
         .slice(0, 24);
       const marker = `Benchy • ${nonce}`;
       if (row.first_attempt !== null) {
-        const existing = await findDelivery(
+        const existing = await findRecentMessage(
           channel,
-          guild.client.user.id,
-          marker,
           row.first_attempt,
+          (message) =>
+            message.author.id === guild.client.user.id &&
+            message.embeds.some((embed) => embed.footer?.text === marker),
         );
         if (existing) {
-          store.sent(row.id, existing);
+          store.sent(row.id, existing.id);
           continue;
         }
       }

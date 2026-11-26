@@ -49,6 +49,21 @@ type JobRow = {
 
 type Route = { source: string; created: number; thread: string | null };
 
+export type RulesText = {
+  title: string;
+  markdown: string;
+  continuation: string;
+};
+export type RulesMessage = {
+  id?: string;
+  pending?: { nonce: string; since: number; digests: string[] };
+};
+export type RulesPublication = {
+  revision: number;
+  messages: RulesMessage[];
+  text?: RulesText;
+};
+
 export class Store {
   private db: DatabaseSync;
 
@@ -324,6 +339,23 @@ export class Store {
           .get(discord, github),
       );
     });
+  }
+
+  readRules(channel: string): RulesPublication {
+    const row = this.db
+      .prepare("SELECT value FROM metadata WHERE name = ?")
+      .get(`rules:${channel}`) as { value: string } | undefined;
+    return row
+      ? (JSON.parse(row.value) as RulesPublication)
+      : { revision: 0, messages: [] };
+  }
+
+  saveRules(channel: string, publication: RulesPublication) {
+    this.db
+      .prepare(
+        "INSERT INTO metadata VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+      )
+      .run(`rules:${channel}`, JSON.stringify(publication));
   }
 
   status() {

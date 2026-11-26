@@ -4,6 +4,7 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 
 | Command                                       | What it does                                                                                                         |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `/setup rules`                                | Opens a private Markdown preview and publishes to the configured rules channel.                                      |
 | `/info`                                       | Shares official PrintBench links with the channel.                                                                   |
 | **Apps → Send to Support**                    | Creates an attributed forum post from a selected message and replies with the new link.                              |
 | `/ban member reason`                          | Privately confirms a ban and queues an audit entry after Discord accepts it.                                         |
@@ -29,12 +30,21 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 | `#support`              | Use a forum and create one moderator-only tag named **Solved**. Give Benchy View Channel, Send Messages, Read Message History, and Manage Threads. Give intended members View Channel and Send Messages in Threads. If a tag is required, Benchy uses the first available non-moderated tag other than Solved.  |
 | Support source channels | Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Use text channels with universal view and message history, or channels with the same view overwrites as Support and universal message history. Benchy checks these permissions and the original author's access before copying. |
 | `#mod-log`              | Deny View Channel to `@everyone`, and allow it for only Benchy's bot role and configured staff roles. Give Benchy Send Messages, Embed Links, and Read Message History. Server administrators retain Discord's inherent access.                                                                                 |
+| `#rules`                | Set `DISCORD_RULES_CHANNEL_ID`. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History so it can publish and update its rules posts.                                                                                                                                                    |
 | `#welcome`              | Make it visible to new members after screening. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Set the rules channel ID for the greeting link.                                                                                                                                 |
 | Other forums            | Grant Benchy View Channel and Manage Threads wherever staff should be able to use `/lock` and `/unlock`.                                                                                                                                                                                                        |
 
 Turn off Discord's built-in system-channel join messages if they duplicate the new greeting. Leave your existing Community Onboarding questions and release role options in place.
 
 [Discord application setup](https://docs.discord.com/developers/quick-start/getting-started) · [Discord Community Onboarding](https://support.discord.com/hc/en-us/articles/11074987197975-Community-Onboarding-FAQ)
+
+## Publish the rules
+
+Run `/setup rules` with **Manage Server** and access to the rules channel. Enter an embed title and paste Markdown into the first field. Use the optional second field for longer rules. Each field accepts up to 4,000 characters. Benchy splits longer text into embeds, using section or paragraph breaks where possible. It previews separate Discord messages when the combined embed text exceeds the 6,000-character limit for a single message.
+
+Use **Edit**, **Publish**, or **Cancel** from the private preview. The first publish creates a Benchy-managed rules post that you can pin. Later publishes update it in place with pings suppressed, so links to the primary message stay valid. When a shorter version fits in one message, the preview indicates that publishing removes Benchy's previous continuation.
+
+[Discord embed limits](https://docs.discord.com/developers/resources/message#embed-limits)
 
 ## Contributor recognition
 
@@ -63,6 +73,7 @@ A member connects GitHub in Discord's **Connections** settings and runs `/contri
 - Open an issue and pull request. Confirm the embeds are visible to an opted-in regular member and hidden from one without the role. Redeliver a successful webhook and verify it does not post twice. Confirm an incorrect signature gets `401`.
 - Route a message with an attachment from an allowed channel. Check the excerpt, author, both links, and repeat routing. Try it from a restricted source or with a member who cannot reply in Support. Lock the new post, confirm regular members cannot reopen it, then use `/unlock post:<link>`.
 - Cancel a ban, then confirm a ban on a disposable test member. Try a target above the moderator or Benchy in the hierarchy. Confirm the private audit entry and Discord audit reason, and check that message history survives. A delivery queued before a Discord interruption should appear once service is restored.
+- Preview a long rules post, cancel it, then publish it. Edit it down to one message and check that the primary message link stays the same and the continuation is removed.
 - Mark a Support post solved and then clear the tag. Check that its other tags remain. Confirm a timeout, remove it, then kick a disposable test member. Check all three entries in the private moderation log.
 - Test a Contributor claim with a linked GitHub account that authored a merged PR in a test organization and with an account that has no merged PR there. Grant Contributor manually using an issue or review link and confirm the audit entry.
 - Join as a test member with screening enabled and verify the welcome arrives after acceptance. Repeat with screening off. Check that a rejoin gets a new welcome and open all `/info` links.

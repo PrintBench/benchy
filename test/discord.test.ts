@@ -7,7 +7,13 @@ import {
   OverwriteType,
   PermissionsBitField,
 } from "discord.js";
-import type { Guild, Interaction, MessageCreateOptions } from "discord.js";
+import type {
+  APIEmbed,
+  Guild,
+  Interaction,
+  MessageCreateOptions,
+  ModalBuilder,
+} from "discord.js";
 import { commandHandlers } from "../src/commands.js";
 import type { Config } from "../src/config.js";
 import { contributorClaims } from "../src/contributors.js";
@@ -193,6 +199,50 @@ function setup() {
       return this;
     },
   };
+  type RulesPost = {
+    id: string;
+    embeds: APIEmbed[];
+    createdTimestamp: number;
+    author: { id: string };
+  };
+  const rulesPosts = new Collection<string, RulesPost>();
+  const rulesErrors: Error[] = [];
+  let rulesPostCount = 0;
+  const rulesChannel = {
+    ...text(rules),
+    client: { user: { id: bot } },
+    messages: {
+      fetch: async (query: { message?: string }) => {
+        if (!query.message) return rulesPosts;
+        const existing = rulesPosts.get(query.message);
+        if (!existing)
+          throw Object.assign(new Error("Unknown message"), { code: 10008 });
+        return existing;
+      },
+    },
+    send: async (message: {
+      embeds: APIEmbed[];
+      allowedMentions: MessageCreateOptions["allowedMentions"];
+    }) => {
+      assert.deepEqual(message.allowedMentions?.parse, []);
+      const published = {
+        id: `rules-${++rulesPostCount}`,
+        embeds: message.embeds,
+        createdTimestamp: Date.now(),
+        author: { id: bot },
+        async edit(options: { embeds: APIEmbed[] }) {
+          this.embeds = options.embeds;
+          return this;
+        },
+        async delete() {
+          rulesPosts.delete(this.id);
+        },
+      };
+      rulesPosts.set(published.id, published);
+      if (rulesErrors.length) throw rulesErrors.shift();
+      return published;
+    },
+  };
   const channels = [
     text(release),
     text(feed, [botRole, feedRole]),
@@ -200,6 +250,7 @@ function setup() {
     support,
     text(audit, [modRole, botRole]),
     text(welcome),
+    rulesChannel,
     post,
   ];
   const people = new Map([
@@ -266,6 +317,8 @@ function setup() {
     joined,
     kicks,
     timeouts,
+    rulesPosts,
+    rulesErrors,
   };
 }
 
@@ -287,6 +340,7 @@ function interaction(
       id: moderator,
       guild: { ownerId: "owner" },
       roles: { cache: new Collection([[modRole, {}]]) },
+      permissions: new PermissionsBitField(PermissionsBitField.All),
     },
     memberPermissions: new PermissionsBitField(PermissionsBitField.All),
     inCachedGuild: () => true,
@@ -309,6 +363,9 @@ function interaction(
     },
     async update(body: Response) {
       this.replied = true;
+      output.push(body);
+    },
+    async followUp(body: Response) {
       output.push(body);
     },
     async editReply(body: Response | string) {
@@ -738,4 +795,143 @@ test("Contributor claims bind OAuth to the Discord user and verify merged PR aut
   signedIn = privileged;
   assert.equal((await claims.complete(link(privileged, "6"))).status, 422);
   assert.equal(people.get(privileged)?.roles.cache.has(contributorRole), false);
+});
+
+function rulesFlow(guild: Guild, store: Store) {
+  const handle = commandHandlers(config, store);
+  let next = 1;
+  const id = () => String(BigInt(command) + BigInt(100 + next++));
+  return {
+    async open(changes = {}) {
+      const slash = interaction(guild, "slash", {
+        id: id(),
+        commandName: "setup",
+        ...changes,
+      });
+      await handle(slash.input);
+      return slash;
+    },
+    async preview(form: string, markdown: string, continuation = "") {
+      const values = new Map([
+        ["title", "Server Rules"],
+        ["markdown", markdown],
+      ]);
+      if (continuation) values.set("continuation", continuation);
+      const modal = interaction(guild, "modal", {
+        id: id(),
+        customId: `rules:form:${form}`,
+        fields: {
+          fields: values,
+          getTextInputValue: (key: string) => values.get(key),
+        },
+      });
+      await handle(modal.input);
+      return modal;
+    },
+    async choose(preview: string, action: "publish" | "cancel" | "edit") {
+      const button = interaction(guild, "button", {
+        id: id(),
+        customId: `rules:${action}:${preview}`,
+      });
+      await handle(button.input);
+      return button;
+    },
+  };
+}
+
+test("rules require Manage Server and preview privately before stable publication", async (t) => {
+  const { store, guild, people, rulesPosts } = setup();
+  t.after(() => store.close());
+  const flow = rulesFlow(guild, store);
+  const denied = await flow.open({
+    user: { id: author },
+    member: people.get(author),
+  });
+  assert.equal(denied.output[0].flags, MessageFlags.Ephemeral);
+  assert.match(denied.output[0].content ?? "", /need Manage Server/);
+
+  const opened = await flow.open();
+  const modal = (opened.output[0] as unknown as ModalBuilder).toJSON();
+  assert.equal(modal.title, "Set up server rules");
+  const preview = await flow.preview(
+    opened.input.id,
+    "First draft",
+    "a".repeat(3998),
+  );
+  assert.equal(rulesPosts.size, 0);
+  assert.match(preview.output[0].content ?? "", /Preview/);
+  const edit = await flow.choose(preview.input.id, "edit");
+  const editForm = (edit.output[0] as unknown as ModalBuilder).toJSON();
+  assert.match(JSON.stringify(editForm), /First draft/);
+  const edited = await flow.preview(edit.input.id, "Edited draft");
+  await flow.choose(edited.input.id, "cancel");
+  assert.equal(rulesPosts.size, 0);
+
+  const large = await flow.preview(
+    (await flow.open()).input.id,
+    "a".repeat(4000),
+    "b".repeat(4000),
+  );
+  assert.equal(large.output.length, 2);
+  assert.equal(large.output[1].flags, MessageFlags.Ephemeral);
+  assert.equal(rulesPosts.size, 0);
+  const concurrent = await flow.preview(
+    (await flow.open()).input.id,
+    "An outdated draft",
+  );
+  await flow.choose(large.input.id, "publish");
+  assert.equal(rulesPosts.size, 2);
+  const [primary, secondary] = store
+    .readRules(rules)
+    .messages.map(({ id }) => id!);
+  assert.equal(rulesPosts.get(primary)?.embeds[0].description?.length, 4000);
+  assert.equal(rulesPosts.get(secondary)?.embeds[0].description?.length, 4000);
+  const stale = await flow.choose(concurrent.input.id, "publish");
+  assert.match(
+    stale.output.at(-1)?.content ?? "",
+    /changed after this preview/,
+  );
+
+  const revised = await flow.preview((await flow.open()).input.id, "New rules");
+  assert.match(
+    revised.output[0].content ?? "",
+    /removes Benchy's old continuation/,
+  );
+  await flow.choose(revised.input.id, "publish");
+  assert.deepEqual([...rulesPosts.keys()], [primary]);
+  assert.equal(rulesPosts.get(primary)?.embeds[0].description, "New rules");
+  const reopened = await flow.open();
+  assert.match(
+    JSON.stringify((reopened.output[0] as unknown as ModalBuilder).toJSON()),
+    /New rules/,
+  );
+});
+
+test("publishing after an interrupted Discord response recovers the original rules message", async (t) => {
+  const { store, guild, rulesPosts, rulesErrors } = setup();
+  t.after(() => store.close());
+  let flow = rulesFlow(guild, store);
+  const preview = await flow.preview(
+    (await flow.open()).input.id,
+    "Rules before interruption",
+  );
+  rulesErrors.push(
+    Object.assign(new Error("Connection lost"), { status: 503 }),
+  );
+  await flow.choose(preview.input.id, "publish");
+  assert.equal(rulesPosts.size, 1);
+  const [published] = [...rulesPosts.keys()];
+
+  flow = rulesFlow(guild, store);
+  const retry = await flow.preview(
+    (await flow.open()).input.id,
+    "Rules after interruption",
+  );
+  await flow.choose(retry.input.id, "publish");
+  assert.deepEqual([...rulesPosts.keys()], [published]);
+  assert.equal(
+    rulesPosts.get(published)?.embeds[0].description,
+    "Rules after interruption",
+  );
+  assert.equal(store.readRules(rules).messages[0].id, published);
 });
