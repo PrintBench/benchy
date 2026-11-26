@@ -10,6 +10,8 @@ import { commands, commandHandlers } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { contributorClaims } from "./contributors.js";
 import {
+  checkDiscordSetup,
+  DiscordSetupError,
   drainJobs,
   quiet,
   reconcileMemberEvents,
@@ -45,7 +47,10 @@ function startTask(name: string, action: () => Promise<unknown>) {
     })
     .catch((error) =>
       log("error", name, {
-        ...errorDetails(error),
+        ...errorDetails(
+          error instanceof DiscordSetupError ? error.cause : error,
+        ),
+        ...(error instanceof DiscordSetupError ? { step: error.step } : {}),
         ...(error instanceof UserError ? { message: error.message } : {}),
       }),
     )
@@ -63,17 +68,27 @@ function guildReady() {
 
 async function configureDiscord() {
   if (configuredGuild || !client.isReady()) return;
-  const guild = await client.guilds.fetch(config.guild);
+  const applicationId = client.user.id;
+  const guild = await checkDiscordSetup(
+    "fetch_discord_guild",
+    "Check DISCORD_GUILD_ID and verify that the Discord application for DISCORD_TOKEN is installed on that server.",
+    () => client.guilds.fetch(config.guild),
+  );
   await validateGuild(guild, config);
-  await client.rest.put(
-    Routes.applicationGuildCommands(client.user.id, guild.id),
-    { body: commands },
+  await checkDiscordSetup(
+    "register_guild_commands",
+    "Check that Benchy was installed on this server with the bot and applications.commands scopes.",
+    () =>
+      client.rest.put(
+        Routes.applicationGuildCommands(applicationId, guild.id),
+        { body: commands },
+      ),
   );
   if (shuttingDown) return;
   configuredGuild = guild;
   log("info", "discord_ready", {
     guild: guild.id,
-    application: client.user.id,
+    application: applicationId,
   });
   startTask("reconcile_members", () => reconcileMemberEvents(guild, store));
   startTask("drain_deliveries", () => drainJobs(guild, config, store));

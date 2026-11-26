@@ -36,6 +36,16 @@ const {
 
 export class UserError extends Error {}
 
+export class DiscordSetupError extends UserError {
+  constructor(
+    readonly step: string,
+    hint: string,
+    cause: unknown,
+  ) {
+    super(hint, { cause });
+  }
+}
+
 export function discordStatus(error: unknown) {
   return typeof error === "object" && error !== null && "status" in error
     ? (error.status as number)
@@ -46,6 +56,21 @@ export function discordCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error
     ? error.code
     : undefined;
+}
+
+export async function checkDiscordSetup<T>(
+  step: string,
+  hint: string,
+  request: () => Promise<T>,
+) {
+  try {
+    return await request();
+  } catch (error) {
+    const code = discordCode(error);
+    if (code === 50001 || code === 50013 || code === 10003 || code === 10004)
+      throw new DiscordSetupError(step, hint, error);
+    throw error;
+  }
 }
 
 export function member(guild: Guild, id: string) {
@@ -120,8 +145,16 @@ export async function staffChannel(
 }
 
 export async function validateGuild(guild: Guild, config: Config) {
-  const bot = await guild.members.fetchMe({ force: true });
-  await guild.roles.fetch();
+  const bot = await checkDiscordSetup(
+    "fetch_bot_membership",
+    "Check that the Discord application for DISCORD_TOKEN is installed on the server named by DISCORD_GUILD_ID.",
+    () => guild.members.fetchMe({ force: true }),
+  );
+  await checkDiscordSetup(
+    "fetch_server_roles",
+    "Check DISCORD_GUILD_ID and verify that Benchy is still a member of that server.",
+    () => guild.roles.fetch(),
+  );
   for (const id of [
     config.releaseRole,
     config.github.pull.role,
@@ -133,14 +166,43 @@ export async function validateGuild(guild: Guild, config: Config) {
   }
   if (!bot.permissions.has(BanMembers))
     throw new UserError("Benchy needs Ban Members.");
+  function checkChannel<T>(
+    setting: string,
+    id: string,
+    request: () => Promise<T>,
+  ) {
+    return checkDiscordSetup(
+      setting,
+      `Check that channel ${id} is on the configured server and grant the Benchy role View Channel there.`,
+      request,
+    );
+  }
   const [releases, pulls, issues, audit, welcome, forum] = await Promise.all([
-    textChannel(guild, config.releases),
-    staffChannel(guild, config, "pull"),
-    staffChannel(guild, config, "issue"),
-    staffChannel(guild, config, "audit"),
-    textChannel(guild, config.welcome),
-    supportForum(guild, config.support),
-    textChannel(guild, config.rules),
+    checkChannel("DISCORD_RELEASES_CHANNEL_ID", config.releases, () =>
+      textChannel(guild, config.releases),
+    ),
+    checkChannel(
+      "DISCORD_GITHUB_PULL_CHANNEL_ID",
+      config.github.pull.channel,
+      () => staffChannel(guild, config, "pull"),
+    ),
+    checkChannel(
+      "DISCORD_GITHUB_ISSUE_CHANNEL_ID",
+      config.github.issue.channel,
+      () => staffChannel(guild, config, "issue"),
+    ),
+    checkChannel("DISCORD_MOD_LOG_CHANNEL_ID", config.audit, () =>
+      staffChannel(guild, config, "audit"),
+    ),
+    checkChannel("DISCORD_WELCOME_CHANNEL_ID", config.welcome, () =>
+      textChannel(guild, config.welcome),
+    ),
+    checkChannel("DISCORD_SUPPORT_FORUM_ID", config.support, () =>
+      supportForum(guild, config.support),
+    ),
+    checkChannel("DISCORD_RULES_CHANNEL_ID", config.rules, () =>
+      textChannel(guild, config.rules),
+    ),
   ]);
   const publishing = [
     ViewChannel,
@@ -166,7 +228,11 @@ export async function validateGuild(guild: Guild, config: Config) {
     );
   }
   const sources = await Promise.all(
-    config.sources.map((id) => textChannel(guild, id)),
+    config.sources.map((id) =>
+      checkChannel("DISCORD_SUPPORT_SOURCE_IDS", id, () =>
+        textChannel(guild, id),
+      ),
+    ),
   );
   for (const source of sources) {
     assertBotPermissions(source, bot, publishing);
