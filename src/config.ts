@@ -13,6 +13,18 @@ export type ContributorConfig = {
 };
 export const contributorCallback = "/oauth/discord/callback";
 
+function conflictingSettings(settings: Record<string, string | string[]>) {
+  const namesById = new Map<string, string[]>();
+  for (const [name, value] of Object.entries(settings)) {
+    for (const id of Array.isArray(value) ? value : [value]) {
+      const names = namesById.get(id);
+      if (names) names.push(name);
+      else namesById.set(id, [name]);
+    }
+  }
+  return [...namesById.values()].filter((names) => names.length > 1);
+}
+
 export function loadConfig(env = process.env) {
   function required(name: string) {
     const value = env[name]?.trim();
@@ -104,32 +116,31 @@ export function loadConfig(env = process.env) {
     port,
     dataDirectory: env.DATA_DIR || "./data",
   };
-  const outputs = [
-    config.releases,
-    config.github.pull.channel,
-    config.github.issue.channel,
-    config.support,
-    config.audit,
-    config.welcome,
+  const conflicts = [
+    ...conflictingSettings({
+      DISCORD_RELEASES_CHANNEL_ID: config.releases,
+      DISCORD_GITHUB_PULL_CHANNEL_ID: config.github.pull.channel,
+      DISCORD_GITHUB_ISSUE_CHANNEL_ID: config.github.issue.channel,
+      DISCORD_SUPPORT_FORUM_ID: config.support,
+      DISCORD_MOD_LOG_CHANNEL_ID: config.audit,
+      DISCORD_WELCOME_CHANNEL_ID: config.welcome,
+      DISCORD_SUPPORT_SOURCE_IDS: config.sources,
+    }),
+    ...conflictingSettings({
+      DISCORD_GUILD_ID: config.guild,
+      DISCORD_RELEASE_PINGS_ROLE_ID: config.releaseRole,
+      DISCORD_GITHUB_PULL_ROLE_ID: config.github.pull.role,
+      DISCORD_GITHUB_ISSUE_ROLE_ID: config.github.issue.role,
+      DISCORD_MODERATOR_ROLE_IDS: config.moderators,
+      ...(contributor && { DISCORD_CONTRIBUTOR_ROLE_ID: contributor.role }),
+    }),
   ];
-  const roles = [
-    config.releaseRole,
-    config.github.pull.role,
-    config.github.issue.role,
-    ...config.moderators,
-  ];
-  if (
-    new Set(outputs).size !== outputs.length ||
-    config.sources.some((source) => outputs.includes(source)) ||
-    new Set(roles).size !== roles.length ||
-    roles.includes(config.guild)
-  ) {
-    throw new Error("Benchy channels and groups must use distinct IDs");
-  }
-  if (contributor && [config.guild, ...roles].includes(contributor.role))
+  if (conflicts.length) {
+    const details = conflicts.map((names) => `- ${names.join(", ")}`);
     throw new Error(
-      "The Contributor role must be distinct from the server's other configured roles",
+      ["Discord settings in each group share an ID.", ...details].join("\n"),
     );
+  }
   return { ...config, ...(contributor ? { contributor } : {}) };
 }
 

@@ -968,7 +968,7 @@ test("GitHub feeds require distinct roles and channels", () => {
   assert.deepEqual(loadConfig(githubEnv).github, config.github);
   assert.throws(
     () => loadConfig({ ...githubEnv, DISCORD_GITHUB_ISSUE_ROLE_ID: pullRole }),
-    /must use distinct IDs/,
+    /DISCORD_GITHUB_PULL_ROLE_ID, DISCORD_GITHUB_ISSUE_ROLE_ID/,
   );
   assert.throws(
     () =>
@@ -976,11 +976,31 @@ test("GitHub feeds require distinct roles and channels", () => {
         ...githubEnv,
         DISCORD_GITHUB_ISSUE_CHANNEL_ID: pullChannel,
       }),
-    /must use distinct IDs/,
+    /DISCORD_GITHUB_PULL_CHANNEL_ID, DISCORD_GITHUB_ISSUE_CHANNEL_ID/,
   );
   assert.throws(
     () => loadConfig({ ...githubEnv, DISCORD_GITHUB_PULL_ROLE_ID: "" }),
     /Missing DISCORD_GITHUB_PULL_ROLE_ID/,
+  );
+});
+
+test("startup identifies conflicting channel and role settings without including their values", () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...githubEnv,
+        DISCORD_SUPPORT_SOURCE_IDS: `${source},${welcome}`,
+        DISCORD_MODERATOR_ROLE_IDS: `${modRole},${guildId}`,
+        DISCORD_CONTRIBUTOR_ROLE_ID: pullRole,
+      }),
+    {
+      message: [
+        "Discord settings in each group share an ID.",
+        "- DISCORD_WELCOME_CHANNEL_ID, DISCORD_SUPPORT_SOURCE_IDS",
+        "- DISCORD_GUILD_ID, DISCORD_MODERATOR_ROLE_IDS",
+        "- DISCORD_GITHUB_PULL_ROLE_ID, DISCORD_CONTRIBUTOR_ROLE_ID",
+      ].join("\n"),
+    },
   );
 });
 
