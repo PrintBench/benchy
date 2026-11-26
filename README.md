@@ -35,6 +35,8 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 | `#welcome`              | Make it visible to new members after screening. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Set the rules channel ID for the greeting link.                                                                                                                                 |
 | Other forums            | Grant Benchy View Channel and Manage Threads wherever staff should be able to use `/lock` and `/unlock`.                                                                                                                                                                                                        |
 
+Welcome can also be a Support source when it meets the same channel visibility and message history checks.
+
 For each GitHub feed, deny View Channel to `@everyone`. Allow it for its matching opt-in role, Benchy's bot role, and configured staff roles that should see the feed. Give Benchy Send Messages, Embed Links, and Read Message History. Offer each role as a separate Community Onboarding choice.
 
 Turn off Discord's built-in system-channel join messages if they duplicate the new greeting. Leave your existing Community Onboarding questions and release role options in place.

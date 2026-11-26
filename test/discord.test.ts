@@ -989,19 +989,52 @@ test("startup identifies conflicting channel and role settings without including
     () =>
       loadConfig({
         ...githubEnv,
-        DISCORD_SUPPORT_SOURCE_IDS: `${source},${welcome}`,
+        DISCORD_SUPPORT_SOURCE_IDS: `${source},${release}`,
         DISCORD_MODERATOR_ROLE_IDS: `${modRole},${guildId}`,
         DISCORD_CONTRIBUTOR_ROLE_ID: pullRole,
       }),
     {
       message: [
         "Discord settings in each group share an ID.",
-        "- DISCORD_WELCOME_CHANNEL_ID, DISCORD_SUPPORT_SOURCE_IDS",
+        "- DISCORD_RELEASES_CHANNEL_ID, DISCORD_SUPPORT_SOURCE_IDS",
         "- DISCORD_GUILD_ID, DISCORD_MODERATOR_ROLE_IDS",
         "- DISCORD_GITHUB_PULL_ROLE_ID, DISCORD_CONTRIBUTOR_ROLE_ID",
       ].join("\n"),
     },
   );
+});
+
+test("Welcome can be a Support source and receive the redirect reply", async (t) => {
+  const { store, guild, posts, operations } = setup();
+  t.after(() => store.close());
+  const configured = loadConfig({
+    ...githubEnv,
+    DISCORD_SUPPORT_SOURCE_IDS: `${source},${welcome}`,
+  });
+  assert.deepEqual(configured.sources, [source, welcome]);
+  const handle = commandHandlers(configured, store);
+  const menu = interaction(guild, "message", {
+    channelId: welcome,
+    commandName: "Send to Support",
+    targetMessage: {
+      id: original,
+      channelId: welcome,
+      author: { id: author },
+      content: "How do I install PrintBench?",
+      editedTimestamp: null,
+      attachments: new Collection(),
+    },
+  });
+  await handle(menu.input);
+  const modal = interaction(guild, "modal", {
+    customId: `support:${command}`,
+    fields: { getTextInputValue: () => "Installation question" },
+  });
+  await handle(modal.input);
+  assert.equal(posts.length, 1);
+  await drainJobs(guild, configured, store);
+  assert.equal(operations[0].channel, welcome);
+  assert.equal(operations[0].message.reply?.messageReference, original);
 });
 
 function enqueueGitHubActivity(store: Store) {

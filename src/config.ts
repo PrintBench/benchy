@@ -124,7 +124,10 @@ export function loadConfig(env = process.env) {
       DISCORD_SUPPORT_FORUM_ID: config.support,
       DISCORD_MOD_LOG_CHANNEL_ID: config.audit,
       DISCORD_WELCOME_CHANNEL_ID: config.welcome,
-      DISCORD_SUPPORT_SOURCE_IDS: config.sources,
+      // Welcome can also host support questions. Routing checks its audience separately.
+      DISCORD_SUPPORT_SOURCE_IDS: config.sources.filter(
+        (id) => id !== config.welcome,
+      ),
     }),
     ...conflictingSettings({
       DISCORD_GUILD_ID: config.guild,
