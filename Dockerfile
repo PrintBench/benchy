@@ -1,4 +1,8 @@
-FROM node:24-bookworm-slim AS build
+FROM node:24-bookworm-slim AS base
+# npm 11.21.3 bundles Undici 6.29.1, including the security fixes for the 6.x line.
+RUN npm install --global --no-audit --no-fund npm@11.21.3 && npm cache clean --force
+
+FROM base AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -7,7 +11,7 @@ COPY src ./src
 COPY test ./test
 RUN npm run build
 
-FROM node:24-bookworm-slim AS runtime
+FROM base AS runtime
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/data
 WORKDIR /app
 COPY package.json package-lock.json ./
