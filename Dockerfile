@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS base
+FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530 AS base
 # npm 11.21.3 bundles Undici 6.29.1, including the security fixes for the 6.x line.
 RUN npm install --global --no-audit --no-fund npm@11.21.3 && npm cache clean --force
 
