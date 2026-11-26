@@ -1,0 +1,26 @@
+{
+  "name": "benchy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The PrintBench Discord bot",
+  "type": "module",
+  "engines": {
+    "node": "^24.17.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm test",
+    "maintenance": "node dist/src/maintenance.js"
+  },
+  "dependencies": {
+    "discord.js": "14.28.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "prettier": "3.10.1",
+    "typescript": "5.9.3"
+  }
+}

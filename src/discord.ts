@@ -1,0 +1,469 @@
+import { createHash } from "node:crypto";
+import {
+  ChannelType,
+  EmbedBuilder,
+  escapeMarkdown,
+  MessageFlags,
+  PermissionFlagsBits,
+} from "discord.js";
+import type {
+  Guild,
+  GuildMember,
+  GuildTextBasedChannel,
+  MessageCreateOptions,
+} from "discord.js";
+import type { Config } from "./config.js";
+import {
+  channelOverwrites,
+  coversSupportAudience,
+  isRoleGated,
+} from "./permissions.js";
+import { errorDetails, log } from "./log.js";
+import type { Ban, Job, Store } from "./store.js";
+
+export const quiet = { parse: [], repliedUser: false } as const;
+const {
+  ViewChannel,
+  SendMessages,
+  SendMessagesInThreads,
+  ReadMessageHistory,
+  EmbedLinks,
+  BanMembers,
+  MentionEveryone,
+  ManageThreads,
+} = PermissionFlagsBits;
+
+export class UserError extends Error {}
+
+export function discordStatus(error: unknown) {
+  return typeof error === "object" && error !== null && "status" in error
+    ? (error.status as number)
+    : undefined;
+}
+
+export function discordCode(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error
+    ? error.code
+    : undefined;
+}
+
+export function member(guild: Guild, id: string) {
+  return guild.members.fetch({ user: id, force: true, cache: false });
+}
+
+export function assertBotPermissions(
+  channel: {
+    permissionsFor(
+      member: GuildMember,
+    ): { has(permissions: bigint[]): boolean } | null;
+    id: string;
+  },
+  bot: GuildMember,
+  permissions: bigint[],
+) {
+  if (!channel.permissionsFor(bot)?.has(permissions)) {
+    throw new UserError(
+      `Benchy is missing permissions in channel ${channel.id}.`,
+    );
+  }
+}
+
+export async function textChannel(guild: Guild, id: string) {
+  const channel = await guild.channels.fetch(id, { force: true });
+  if (
+    !channel ||
+    (channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.GuildAnnouncement)
+  ) {
+    throw new UserError(
+      `Channel ${id} must be a text or announcements channel.`,
+    );
+  }
+  return channel;
+}
+
+export async function supportForum(guild: Guild, id: string) {
+  const forum = await guild.channels.fetch(id, { force: true });
+  if (forum?.type !== ChannelType.GuildForum)
+    throw new UserError(`Channel ${id} must be a forum.`);
+  return forum;
+}
+
+export async function staffChannel(
+  guild: Guild,
+  config: Config,
+  kind: "activity" | "audit",
+) {
+  const channel = await textChannel(
+    guild,
+    kind === "activity" ? config.github : config.audit,
+  );
+  const botRole = guild.members.me?.roles.botRole?.id;
+  const roles = botRole
+    ? [...config.moderators, botRole]
+    : [...config.moderators];
+  const optIn = kind === "activity" ? config.githubRole : undefined;
+  if (optIn) roles.push(optIn);
+  if (!isRoleGated(guild.id, channelOverwrites(channel), roles, optIn)) {
+    throw new UserError(`Channel ${channel.id} needs private role overwrites.`);
+  }
+  return channel;
+}
+
+export async function validateGuild(guild: Guild, config: Config) {
+  const bot = await guild.members.fetchMe({ force: true });
+  await guild.roles.fetch();
+  for (const id of [
+    config.releaseRole,
+    config.githubRole,
+    ...config.moderators,
+  ]) {
+    if (!guild.roles.cache.has(id))
+      throw new UserError(`Discord role ${id} is missing.`);
+  }
+  if (!bot.permissions.has(BanMembers))
+    throw new UserError("Benchy needs Ban Members.");
+  const [releases, github, audit, welcome, forum] = await Promise.all([
+    textChannel(guild, config.releases),
+    staffChannel(guild, config, "activity"),
+    staffChannel(guild, config, "audit"),
+    textChannel(guild, config.welcome),
+    supportForum(guild, config.support),
+    textChannel(guild, config.rules),
+  ]);
+  const publishing = [
+    ViewChannel,
+    SendMessages,
+    ReadMessageHistory,
+    EmbedLinks,
+  ];
+  for (const channel of [releases, github, audit, welcome])
+    assertBotPermissions(channel, bot, publishing);
+  if (!guild.roles.cache.get(config.releaseRole)?.mentionable) {
+    assertBotPermissions(releases, bot, [MentionEveryone]);
+  }
+
+  assertBotPermissions(forum, bot, [
+    ViewChannel,
+    SendMessages,
+    ReadMessageHistory,
+    ManageThreads,
+  ]);
+  if (
+    forum.flags.has("RequireTag") &&
+    !forum.availableTags.some((tag) => !tag.moderated)
+  ) {
+    throw new UserError(
+      "The Support forum needs an available non-moderated tag or optional tags.",
+    );
+  }
+  const sources = await Promise.all(
+    config.sources.map((id) => textChannel(guild, id)),
+  );
+  for (const source of sources) {
+    assertBotPermissions(source, bot, publishing);
+    if (
+      source.type !== ChannelType.GuildText ||
+      source.flags.has("IsSpoilerChannel") ||
+      source.nsfw !== forum.nsfw ||
+      !coversSupportAudience(
+        guild.roles.everyone.permissions.bitfield,
+        guild.id,
+        channelOverwrites(source),
+        channelOverwrites(forum),
+      )
+    ) {
+      throw new UserError(
+        `Support cannot safely route from channel ${source.id}.`,
+      );
+    }
+  }
+}
+
+export function banReason(ban: Ban) {
+  return `Benchy ${ban.id} | Moderator ${ban.moderator} | ${ban.reason.toWellFormed()}`;
+}
+
+export async function currentBan(guild: Guild, user: string) {
+  try {
+    return await guild.bans.fetch({ user, force: true, cache: false });
+  } catch (error) {
+    if (discordCode(error) !== 10026) throw error;
+    return null;
+  }
+}
+
+function bounded(text: string, size: number) {
+  return text.length <= size ? text : `${text.slice(0, size - 1).trimEnd()}…`;
+}
+
+type Announcement = {
+  embed: EmbedBuilder;
+  content?: string;
+  flags?: MessageCreateOptions["flags"];
+  reply?: MessageCreateOptions["reply"];
+  users?: string[];
+  roles?: string[];
+};
+
+function announcement(config: Config, job: Job): Announcement {
+  switch (job.kind) {
+    case "release": {
+      const { release } = job;
+      const tag = bounded(escapeMarkdown(release.tag), 150);
+      const base = `https://github.com/${config.repository}/releases`;
+      const path = encodeURIComponent(release.tag);
+      const releaseUrl = `${base}/tag/${path}`;
+      const downloadUrl = `${base}/download/${path}/compose.yaml`;
+      const embed = new EmbedBuilder()
+        .setColor(release.prerelease ? 0x997242 : 0x287d61)
+        .setTitle(
+          `PrintBench ${tag}${release.prerelease ? " · Prerelease" : ""}`,
+        )
+        .setURL(releaseUrl)
+        .setDescription(
+          [
+            release.summary
+              ? bounded(escapeMarkdown(release.summary), 1200)
+              : "",
+            `[Release notes](${releaseUrl}) · [Download Compose file](${downloadUrl})`,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        )
+        .setTimestamp(new Date(release.published));
+      return {
+        embed,
+        content: release.prerelease ? undefined : `<@&${config.releaseRole}>`,
+        roles: release.prerelease ? [] : [config.releaseRole],
+        flags: release.prerelease
+          ? MessageFlags.SuppressNotifications
+          : undefined,
+      };
+    }
+    case "activity": {
+      const pull = job.event === "pull";
+      const embed = new EmbedBuilder()
+        .setColor(pull ? 0x6e54c2 : 0x287d61)
+        .setTitle(
+          bounded(
+            `${pull ? "Pull request" : "Issue"} #${job.number} · ${escapeMarkdown(job.title)}`,
+            256,
+          ),
+        )
+        .setURL(
+          `https://github.com/${config.repository}/${pull ? "pull" : "issues"}/${job.number}`,
+        )
+        .setDescription(
+          `Opened by **${escapeMarkdown(job.author)}** in ${config.repository}`,
+        );
+      return { embed, flags: MessageFlags.SuppressNotifications };
+    }
+    case "welcome":
+      return {
+        content: `Welcome, <@${job.member}>!`,
+        users: [job.member],
+        embed: new EmbedBuilder().setDescription(
+          `Start with <#${config.rules}> and ask technical questions in <#${config.support}>. Use \`/info\` for PrintBench links.`,
+        ),
+      };
+    case "audit":
+      return {
+        embed: new EmbedBuilder()
+          .setTitle("Member banned")
+          .addFields(
+            {
+              name: "Moderator",
+              value: `<@${job.ban.moderator}> (\`${job.ban.moderator}\`)`,
+            },
+            {
+              name: "Target",
+              value: `<@${job.ban.target}> (\`${job.ban.target}\`)`,
+            },
+            { name: "Reason", value: escapeMarkdown(job.ban.reason) },
+          )
+          .setTimestamp(new Date(job.ban.created)),
+      };
+    case "redirect":
+      return {
+        embed: new EmbedBuilder().setDescription(
+          `Continue this question in [the Support post](https://discord.com/channels/${config.guild}/${job.thread}).`,
+        ),
+        reply: { messageReference: job.message, failIfNotExists: true },
+      };
+  }
+}
+
+async function findDelivery(
+  channel: GuildTextBasedChannel,
+  bot: string,
+  marker: string,
+  since: number,
+) {
+  let before: string | undefined;
+  for (;;) {
+    const messages = await channel.messages.fetch({
+      limit: 100,
+      before,
+      cache: false,
+    });
+    const existing = messages.find(
+      (message) =>
+        message.author.id === bot &&
+        message.embeds.some((embed) => embed.footer?.text === marker),
+    );
+    if (existing) return existing.id;
+    const oldest = messages.last();
+    if (
+      !oldest ||
+      messages.size < 100 ||
+      oldest.createdTimestamp < since - 5_000
+    )
+      return null;
+    before = oldest.id;
+  }
+}
+
+export async function drainJobs(guild: Guild, config: Config, store: Store) {
+  for (const row of store.nextJobs()) {
+    const { job } = row;
+    try {
+      let channel: GuildTextBasedChannel;
+      switch (job.kind) {
+        case "welcome": {
+          const author = await member(guild, job.member).catch((error) => {
+            if (discordCode(error) !== 10007) throw error;
+            return null;
+          });
+          if (
+            !author ||
+            author.pending ||
+            author.user.bot ||
+            author.joinedTimestamp !== job.joined
+          ) {
+            store.sent(row.id, "member no longer eligible");
+            continue;
+          }
+          channel = await textChannel(guild, config.welcome);
+          break;
+        }
+        case "audit":
+        case "activity":
+          channel = await staffChannel(guild, config, job.kind);
+          break;
+        case "release":
+          channel = await textChannel(guild, config.releases);
+          if (!job.release.prerelease) {
+            const role = await guild.roles.fetch(config.releaseRole, {
+              force: true,
+            });
+            if (!role)
+              throw new UserError(
+                "The configured Release Pings role is missing.",
+              );
+            if (!role.mentionable)
+              assertBotPermissions(channel, guild.members.me!, [
+                MentionEveryone,
+              ]);
+          }
+          break;
+        case "redirect":
+          channel = await textChannel(guild, job.source);
+          break;
+      }
+
+      // Discord enforces a short nonce window. The footer also lets us recover a
+      // successful send after a longer restart or an ambiguous network failure.
+      const nonce = createHash("sha256")
+        .update(row.id)
+        .digest("hex")
+        .slice(0, 24);
+      const marker = `Benchy • ${nonce}`;
+      if (row.first_attempt !== null) {
+        const existing = await findDelivery(
+          channel,
+          guild.client.user.id,
+          marker,
+          row.first_attempt,
+        );
+        if (existing) {
+          store.sent(row.id, existing);
+          continue;
+        }
+      }
+      const { embed, content, roles, flags, users, reply } = announcement(
+        config,
+        job,
+      );
+      store.startJob(row.id);
+      const posted = await channel.send({
+        content,
+        flags,
+        reply,
+        nonce,
+        enforceNonce: true,
+        embeds: [embed.setFooter({ text: marker })],
+        allowedMentions: { parse: [], repliedUser: false, users, roles },
+      });
+      store.sent(row.id, posted.id);
+      log("info", "delivered", { id: row.id, message: posted.id });
+    } catch (error) {
+      const details = errorDetails(error);
+      const status = discordStatus(error);
+      const result = JSON.stringify({
+        ...details,
+        ...(error instanceof UserError ? { message: error.message } : {}),
+      });
+      if (
+        row.attempts >= 11 ||
+        error instanceof UserError ||
+        (status !== undefined &&
+          status >= 400 &&
+          status < 500 &&
+          status !== 429)
+      ) {
+        store.fail(row.id, result);
+        log("error", "delivery_failed", { id: row.id, ...details });
+      } else {
+        const delay = Math.min(15 * 60_000, 5_000 * 2 ** row.attempts);
+        store.retry(row.id, result, Date.now() + delay);
+        log("error", "delivery_retry", { id: row.id, delay, ...details });
+      }
+    }
+  }
+}
+
+export async function reconcileMemberEvents(guild: Guild, store: Store) {
+  for (const ban of store.pendingBans(Date.now() - 60_000)) {
+    try {
+      const actual = await currentBan(guild, ban.target);
+      if (actual?.reason === banReason(ban)) {
+        store.completeBan(ban);
+      } else if (ban.created < Date.now() - 5 * 60_000) {
+        store.clearBan(ban.id);
+        log("error", "ban_could_not_be_confirmed", {
+          id: ban.id,
+          target: ban.target,
+        });
+      }
+    } catch (error) {
+      log("error", "ban_reconcile_failed", {
+        id: ban.id,
+        ...errorDetails(error),
+      });
+    }
+  }
+
+  for (const { member: id, joined } of store.screeningMembers()) {
+    try {
+      const checked = await member(guild, id);
+      if (checked.joinedTimestamp !== joined || checked.user.bot)
+        store.forgetScreening(id, joined);
+      else if (!checked.pending) store.welcome(id, joined);
+    } catch (error) {
+      if (discordCode(error) === 10007) store.forgetScreening(id, joined);
+      else
+        log("error", "screening_check_failed", { id, ...errorDetails(error) });
+    }
+  }
+}

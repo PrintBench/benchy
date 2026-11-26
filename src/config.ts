@@ -1,0 +1,84 @@
+export const project = {
+  website: "https://printbench.app/",
+  docs: "https://docs.printbench.app/",
+  github: "https://github.com/PrintBench/printbench",
+  releases: "https://github.com/PrintBench/printbench/releases/latest",
+  download:
+    "https://github.com/PrintBench/printbench/releases/latest/download/compose.yaml",
+};
+
+export function loadConfig(env = process.env) {
+  function required(name: string) {
+    const value = env[name]?.trim();
+    if (!value) throw new Error(`Missing ${name}`);
+    return value;
+  }
+
+  function ids(name: string) {
+    const values = required(name)
+      .split(",")
+      .map((value) => value.trim());
+    if (values.some((value) => !/^\d{17,20}$/.test(value))) {
+      throw new Error(`Invalid Discord ID in ${name}`);
+    }
+    return [...new Set(values)];
+  }
+
+  function id(name: string) {
+    const [value, ...other] = ids(name);
+    if (other.length) throw new Error(`Expected one Discord ID in ${name}`);
+    return value;
+  }
+
+  const repository = env.GITHUB_REPOSITORY?.trim() || "PrintBench/printbench";
+  if (!/^[a-z\d-]+\/[a-z\d_.-]+$/i.test(repository)) {
+    throw new Error("Invalid GITHUB_REPOSITORY");
+  }
+  const webhookSecret = required("GITHUB_WEBHOOK_SECRET");
+  if (webhookSecret.length < 32)
+    throw new Error("GITHUB_WEBHOOK_SECRET must be at least 32 characters");
+  const port = Number(env.PORT ?? 3000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("Invalid PORT");
+
+  const config = {
+    token: required("DISCORD_TOKEN"),
+    guild: id("DISCORD_GUILD_ID"),
+    releases: id("DISCORD_RELEASES_CHANNEL_ID"),
+    releaseRole: id("DISCORD_RELEASE_PINGS_ROLE_ID"),
+    github: id("DISCORD_GITHUB_CHANNEL_ID"),
+    githubRole: id("DISCORD_GITHUB_ROLE_ID"),
+    support: id("DISCORD_SUPPORT_FORUM_ID"),
+    sources: ids("DISCORD_SUPPORT_SOURCE_IDS"),
+    audit: id("DISCORD_MOD_LOG_CHANNEL_ID"),
+    moderators: ids("DISCORD_MODERATOR_ROLE_IDS"),
+    welcome: id("DISCORD_WELCOME_CHANNEL_ID"),
+    rules: id("DISCORD_RULES_CHANNEL_ID"),
+    repository,
+    webhookSecret,
+    port,
+    dataDirectory: env.DATA_DIR || "./data",
+  };
+  const outputs = [
+    config.releases,
+    config.github,
+    config.support,
+    config.audit,
+    config.welcome,
+  ];
+  if (
+    new Set(outputs).size !== outputs.length ||
+    config.sources.some((source) => outputs.includes(source)) ||
+    [config.releaseRole, config.githubRole, ...config.moderators].includes(
+      config.guild,
+    ) ||
+    config.releaseRole === config.githubRole ||
+    config.moderators.includes(config.githubRole) ||
+    config.moderators.includes(config.releaseRole)
+  ) {
+    throw new Error("Benchy channels and groups must use distinct IDs");
+  }
+  return config;
+}
+
+export type Config = ReturnType<typeof loadConfig>;
