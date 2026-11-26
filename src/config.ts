@@ -83,8 +83,16 @@ export function loadConfig(env = process.env) {
     guild: id("DISCORD_GUILD_ID"),
     releases: id("DISCORD_RELEASES_CHANNEL_ID"),
     releaseRole: id("DISCORD_RELEASE_PINGS_ROLE_ID"),
-    github: id("DISCORD_GITHUB_CHANNEL_ID"),
-    githubRole: id("DISCORD_GITHUB_ROLE_ID"),
+    github: {
+      pull: {
+        channel: id("DISCORD_GITHUB_PULL_CHANNEL_ID"),
+        role: id("DISCORD_GITHUB_PULL_ROLE_ID"),
+      },
+      issue: {
+        channel: id("DISCORD_GITHUB_ISSUE_CHANNEL_ID"),
+        role: id("DISCORD_GITHUB_ISSUE_ROLE_ID"),
+      },
+    },
     support: id("DISCORD_SUPPORT_FORUM_ID"),
     sources: ids("DISCORD_SUPPORT_SOURCE_IDS"),
     audit: id("DISCORD_MOD_LOG_CHANNEL_ID"),
@@ -98,32 +106,27 @@ export function loadConfig(env = process.env) {
   };
   const outputs = [
     config.releases,
-    config.github,
+    config.github.pull.channel,
+    config.github.issue.channel,
     config.support,
     config.audit,
     config.welcome,
   ];
+  const roles = [
+    config.releaseRole,
+    config.github.pull.role,
+    config.github.issue.role,
+    ...config.moderators,
+  ];
   if (
     new Set(outputs).size !== outputs.length ||
     config.sources.some((source) => outputs.includes(source)) ||
-    [config.releaseRole, config.githubRole, ...config.moderators].includes(
-      config.guild,
-    ) ||
-    config.releaseRole === config.githubRole ||
-    config.moderators.includes(config.githubRole) ||
-    config.moderators.includes(config.releaseRole)
+    new Set(roles).size !== roles.length ||
+    roles.includes(config.guild)
   ) {
     throw new Error("Benchy channels and groups must use distinct IDs");
   }
-  if (
-    contributor &&
-    [
-      config.guild,
-      config.releaseRole,
-      config.githubRole,
-      ...config.moderators,
-    ].includes(contributor.role)
-  )
+  if (contributor && [config.guild, ...roles].includes(contributor.role))
     throw new Error(
       "The Contributor role must be distinct from the server's other configured roles",
     );

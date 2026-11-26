@@ -103,17 +103,15 @@ export function initialSupportTag(
 export async function staffChannel(
   guild: Guild,
   config: Config,
-  kind: "activity" | "audit",
+  kind: keyof Config["github"] | "audit",
 ) {
-  const channel = await textChannel(
-    guild,
-    kind === "activity" ? config.github : config.audit,
-  );
+  const feed = kind === "audit" ? undefined : config.github[kind];
+  const channel = await textChannel(guild, feed?.channel ?? config.audit);
   const botRole = guild.members.me?.roles.botRole?.id;
   const roles = botRole
     ? [...config.moderators, botRole]
     : [...config.moderators];
-  const optIn = kind === "activity" ? config.githubRole : undefined;
+  const optIn = feed?.role;
   if (optIn) roles.push(optIn);
   if (!isRoleGated(guild.id, channelOverwrites(channel), roles, optIn)) {
     throw new UserError(`Channel ${channel.id} needs private role overwrites.`);
@@ -126,7 +124,8 @@ export async function validateGuild(guild: Guild, config: Config) {
   await guild.roles.fetch();
   for (const id of [
     config.releaseRole,
-    config.githubRole,
+    config.github.pull.role,
+    config.github.issue.role,
     ...config.moderators,
   ]) {
     if (!guild.roles.cache.has(id))
@@ -134,9 +133,10 @@ export async function validateGuild(guild: Guild, config: Config) {
   }
   if (!bot.permissions.has(BanMembers))
     throw new UserError("Benchy needs Ban Members.");
-  const [releases, github, audit, welcome, forum] = await Promise.all([
+  const [releases, pulls, issues, audit, welcome, forum] = await Promise.all([
     textChannel(guild, config.releases),
-    staffChannel(guild, config, "activity"),
+    staffChannel(guild, config, "pull"),
+    staffChannel(guild, config, "issue"),
     staffChannel(guild, config, "audit"),
     textChannel(guild, config.welcome),
     supportForum(guild, config.support),
@@ -148,7 +148,7 @@ export async function validateGuild(guild: Guild, config: Config) {
     ReadMessageHistory,
     EmbedLinks,
   ];
-  for (const channel of [releases, github, audit, welcome])
+  for (const channel of [releases, pulls, issues, audit, welcome])
     assertBotPermissions(channel, bot, publishing);
   if (!guild.roles.cache.get(config.releaseRole)?.mentionable) {
     assertBotPermissions(releases, bot, [MentionEveryone]);
@@ -384,7 +384,7 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           channel = await staffChannel(
             guild,
             config,
-            job.kind === "activity" ? "activity" : "audit",
+            job.kind === "activity" ? job.event : "audit",
           );
           break;
         case "release":
