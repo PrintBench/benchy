@@ -90,7 +90,15 @@ const configWithContributor: Config = {
   },
 };
 
-function setup({ crossFeedAccess = false } = {}) {
+function setup({
+  crossFeedAccess = false,
+  githubMentionPermission = true,
+  mentionableGitHubRole,
+}: {
+  crossFeedAccess?: boolean;
+  githubMentionPermission?: boolean;
+  mentionableGitHubRole?: string;
+} = {}) {
   const store = new Store(":memory:");
   const operations: { channel: string; message: MessageCreateOptions }[] = [];
   const auditErrors: Error[] = [];
@@ -102,6 +110,10 @@ function setup({ crossFeedAccess = false } = {}) {
   const timeouts: { id: string; until: number | null; reason: string }[] = [];
   const kicks: { id: string; reason: string }[] = [];
   const full = new PermissionsBitField(PermissionsBitField.All);
+  const withoutMentions = new PermissionsBitField(full.bitfield).remove(
+    "Administrator",
+    "MentionEveryone",
+  );
   const ordinary = new PermissionsBitField([
     "ViewChannel",
     "ReadMessageHistory",
@@ -166,7 +178,10 @@ function setup({ crossFeedAccess = false } = {}) {
       permissionOverwrites: { cache },
       nsfw: false,
       flags: { has: () => false },
-      permissionsFor: () => full,
+      permissionsFor: () =>
+        !githubMentionPermission && [pullChannel, issueChannel].includes(id)
+          ? withoutMentions
+          : full,
       messages: {
         fetch: async (query: { message?: string }) =>
           query.message ? { editedTimestamp: null } : new Collection(),
@@ -279,6 +294,12 @@ function setup({ crossFeedAccess = false } = {}) {
     [bot, staffMember(bot, 20, true)],
     [privileged, staffMember(privileged, 15, true)],
   ]);
+  const roles = new Collection(
+    [releaseRole, pullRole, issueRole, modRole].map((id) => [
+      id,
+      { id, mentionable: id === releaseRole || id === mentionableGitHubRole },
+    ]),
+  );
   const guild = {
     id: guildId,
     client: { user: { id: bot } },
@@ -293,15 +314,10 @@ function setup({ crossFeedAccess = false } = {}) {
     },
     roles: {
       everyone: { permissions: ordinary },
-      cache: new Collection(
-        [releaseRole, pullRole, issueRole, modRole].map((id) => [
-          id,
-          { id, mentionable: id === releaseRole },
-        ]),
-      ),
+      cache: roles,
       fetch: async (role?: string) =>
         role
-          ? { id: releaseRole, mentionable: true }
+          ? (roles.get(role) ?? null)
           : new Collection([
               [
                 contributorRole,
@@ -1241,7 +1257,7 @@ function enqueueGitHubActivity(store: Store) {
   );
 }
 
-test("GitHub issues and pull requests reach their matching opt-in feeds without pings", async (t) => {
+test("GitHub issues and pull requests ping only their matching opt-in roles", async (t) => {
   const { store, guild, operations } = setup();
   t.after(() => store.close());
   enqueueGitHubActivity(store);
@@ -1250,15 +1266,58 @@ test("GitHub issues and pull requests reach their matching opt-in feeds without 
     operations.map(({ channel }) => channel),
     [issueChannel, pullChannel],
   );
-  for (const [index, { message }] of operations.entries()) {
-    assert.deepEqual(message.allowedMentions?.parse, []);
-    assert.equal(message.flags, MessageFlags.SuppressNotifications);
-    const url = `https://github.com/PrintBench/printbench/${index === 0 ? "issues/11" : "pull/12"}`;
+  for (const { channel, message } of operations) {
+    const isIssue = channel === issueChannel;
+    const role = isIssue ? issueRole : pullRole;
+    assert.equal(message.content, `<@&${role}>`);
+    assert.deepEqual(message.allowedMentions, {
+      parse: [],
+      repliedUser: false,
+      roles: [role],
+      users: undefined,
+    });
+    assert.equal(message.flags, undefined);
+    const url = `https://github.com/PrintBench/printbench/${isIssue ? "issues/11" : "pull/12"}`;
     assert.equal(firstEmbed(message).url, url);
     assert.deepEqual(linkRows(message), [
-      [[index === 0 ? "View issue" : "View pull request", url]],
+      [[isIssue ? "View issue" : "View pull request", url]],
     ]);
   }
+  enqueueGitHubActivity(store);
+  await drainJobs(guild, config, store);
+  assert.equal(operations.length, 2);
+});
+
+test("GitHub feeds still post when Benchy cannot mention an opt-in role", async (t) => {
+  const { store, guild, operations } = setup({
+    githubMentionPermission: false,
+    mentionableGitHubRole: pullRole,
+  });
+  t.after(() => store.close());
+  enqueueGitHubActivity(store);
+  await drainJobs(guild, config, store);
+  assert.deepEqual(
+    operations.map(({ channel, message }) => ({
+      channel,
+      content: message.content,
+      roles: message.allowedMentions?.roles,
+      flags: message.flags,
+    })),
+    [
+      {
+        channel: issueChannel,
+        content: undefined,
+        roles: undefined,
+        flags: MessageFlags.SuppressNotifications,
+      },
+      {
+        channel: pullChannel,
+        content: `<@&${pullRole}>`,
+        roles: [pullRole],
+        flags: undefined,
+      },
+    ],
+  );
 });
 
 test("Benchy refuses a GitHub feed whose permissions let the other opt-in role view it", async (t) => {

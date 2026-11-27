@@ -25,7 +25,7 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 
 | Channel                 | Channel settings                                                                                                                                                                                                                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `#releases`             | Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Keep `Release Pings` unmentionable by members and grant Benchy **Mention @everyone, @here, and All Roles** only in this channel. Benchy only allows the configured release-role mention here.                                   |
+| `#releases`             | Give Benchy View Channel, Send Messages, Embed Links, and Read Message History. Stable releases ping `Release Pings`.                                                                                                                                                                                           |
 | `#pull-requests`        | Set `DISCORD_GITHUB_PULL_CHANNEL_ID` and `DISCORD_GITHUB_PULL_ROLE_ID` to the pull request channel and its opt-in role.                                                                                                                                                                                         |
 | `#issues`               | Set `DISCORD_GITHUB_ISSUE_CHANNEL_ID` and `DISCORD_GITHUB_ISSUE_ROLE_ID` to the issue channel and its opt-in role.                                                                                                                                                                                              |
 | `#support`              | Use a forum and create one moderator-only tag named **Solved**. Give Benchy View Channel, Send Messages, Read Message History, and Manage Threads. Give intended members View Channel and Send Messages in Threads. If a tag is required, Benchy uses the first available non-moderated tag other than Solved.  |
@@ -38,6 +38,8 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 Welcome can also be a Support source when it meets the same channel visibility and message history checks.
 
 For each GitHub feed, deny View Channel to `@everyone`. Allow it for its matching opt-in role, Benchy's bot role, and configured staff roles that should see the feed. Give Benchy Send Messages, Embed Links, and Read Message History. Offer each role as a separate Community Onboarding choice.
+
+Keep the ping roles unmentionable by members. In the release, pull request, and issue channels, grant **Mention @everyone, @here, and All Roles** through a channel permission override for the Benchy bot role. Benchy allows only the matching role mention in each feed. A GitHub feed missing mention permission still posts quietly and logs `github_ping_unavailable`.
 
 Turn off Discord's built-in system-channel join messages if they duplicate the new greeting. Leave your existing Community Onboarding questions and release role options in place.
 
@@ -79,7 +81,7 @@ For an existing Dockerfile deployment, stop the old app and back up its SQLite v
 ## Staging checks
 
 - Wait for the initial release baseline, publish a prerelease, then promote it to stable. Check descriptions, links, and that only the stable message mentions the test role. Restart the container with the same volume and confirm the announcements stay single.
-- Open an issue and pull request. Confirm each embed appears in its assigned channel and a regular member with only one opt-in role sees only that feed. Redeliver a successful webhook and verify it does not post twice. Confirm an incorrect signature gets `401`.
+- Open an issue and pull request. Confirm each embed appears in its assigned channel and pings only the matching role. Verify that a regular member with one opt-in role can see their chosen feed. Redeliver a successful webhook and check for duplicate messages and pings. Confirm an incorrect signature gets `401`.
 - Route a message with an attachment from an allowed channel. Check the excerpt, author, both links, and repeat routing. Try it from a restricted source or with a member who cannot reply in Support. Lock the new post, confirm regular members cannot reopen it, then use `/unlock post:<link>`.
 - Cancel a ban, then confirm a ban on a disposable test member. Try a target above the moderator or Benchy in the hierarchy. Confirm the private audit entry and Discord audit reason, and check that message history survives. A delivery queued before a Discord interruption should appear once service is restored.
 - Preview a long rules post, cancel it, then publish it. Edit it down to one message and check that the primary message link stays the same and the continuation is removed.

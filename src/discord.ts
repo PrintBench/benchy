@@ -286,7 +286,11 @@ function auditMember(name: string, id: string) {
   return { name, value: `<@${id}>\n\`${id}\``, inline: true };
 }
 
-function announcement(config: Config, job: Job): Announcement {
+function announcement(
+  config: Config,
+  job: Job,
+  githubPingRole?: string,
+): Announcement {
   switch (job.kind) {
     case "release": {
       const { release } = job;
@@ -364,7 +368,9 @@ function announcement(config: Config, job: Job): Announcement {
         components: [
           linkButtons([pull ? "View pull request" : "View issue", url]),
         ],
-        flags: MessageFlags.SuppressNotifications,
+        content: githubPingRole ? `<@&${githubPingRole}>` : undefined,
+        roles: githubPingRole ? [githubPingRole] : undefined,
+        flags: githubPingRole ? undefined : MessageFlags.SuppressNotifications,
       };
     }
     case "welcome":
@@ -549,8 +555,28 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           continue;
         }
       }
+      let githubPingRole: string | undefined;
+      if (job.kind === "activity") {
+        const { role: roleId } = config.github[job.event];
+        const role = await guild.roles.fetch(roleId, { force: true });
+        const bot = guild.members.me;
+        if (
+          role &&
+          (role.mentionable ||
+            (bot && channel.permissionsFor(bot)?.has(MentionEveryone)))
+        ) {
+          githubPingRole = roleId;
+        } else {
+          log("error", "github_ping_unavailable", {
+            channel: channel.id,
+            role: roleId,
+            message:
+              "Check the configured feed role and grant Benchy Mention @everyone, @here, and All Roles in this channel.",
+          });
+        }
+      }
       const { embed, components, content, roles, flags, users, reply } =
-        announcement(config, job);
+        announcement(config, job, githubPingRole);
       store.startJob(row.id);
       const posted = await channel.send({
         content,
