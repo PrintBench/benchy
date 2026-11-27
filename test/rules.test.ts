@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderRules } from "../src/rules.js";
+import { renderMarkdown } from "../src/publishing.js";
 
 const title = "PrintBench Rules";
 
 test("rules up to 4,000 characters use one embed", () => {
   const markdown = "a".repeat(4000);
-  const result = renderRules({ title, markdown, continuation: "" });
+  const result = renderMarkdown({ title, markdown, continuation: "" });
   assert.equal(result.length, 1);
   assert.equal(result[0].length, 1);
   assert.equal(result[0][0].description, markdown);
@@ -17,7 +17,7 @@ test("long rules split near a section heading and fit two embeds in one message"
   const continuation =
     "## Support\n- [Read the docs](https://docs.printbench.app/)\n" +
     "a".repeat(800);
-  const result = renderRules({ title, markdown, continuation });
+  const result = renderMarkdown({ title, markdown, continuation });
   assert.equal(result.length, 1);
   assert.equal(result[0].length, 2);
   assert.equal(result[0][0].description, markdown);
@@ -27,7 +27,7 @@ test("long rules split near a section heading and fit two embeds in one message"
 test("two full Markdown fields fit Discord's per-embed and total message budgets", () => {
   const markdown = "x".repeat(4000);
   const continuation = "y".repeat(4000);
-  const result = renderRules({
+  const result = renderMarkdown({
     title: "t".repeat(200),
     markdown,
     continuation,
@@ -51,12 +51,12 @@ test("crossing an embed boundary keeps fenced Markdown and Unicode intact", () =
   const fence = "```";
   const markdown = `${fence}text\n${"a".repeat(3990)}`;
   const continuation = `${"b".repeat(500)}\n${fence}`;
-  const [[first, second]] = renderRules({ title, markdown, continuation });
+  const [[first, second]] = renderMarkdown({ title, markdown, continuation });
   assert.ok(first.description?.endsWith(`\n${fence}`));
   assert.ok(second.description?.startsWith(`${fence}text\n`));
   assert.ok(second.description?.endsWith(`\n${fence}`));
 
-  const [[left, right]] = renderRules({
+  const [[left, right]] = renderMarkdown({
     title,
     markdown: "x".repeat(3999),
     continuation: "🐙".repeat(10),

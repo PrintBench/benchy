@@ -24,6 +24,10 @@ import { errorDetails, log } from "./log.js";
 import type { Ban, Job, Store } from "./store.js";
 
 export const quiet = { parse: [], repliedUser: false } as const;
+const deliveryMarkerPrefix = "Benchy • ";
+const deliveryNonceLength = 24;
+export const deliveryMarkerLength =
+  deliveryMarkerPrefix.length + deliveryNonceLength;
 const {
   ViewChannel,
   SendMessages,
@@ -286,7 +290,10 @@ function auditMember(name: string, id: string) {
   return { name, value: `<@${id}>\n\`${id}\``, inline: true };
 }
 
-function announcement(config: Config, job: Job): Announcement {
+function announcement(
+  config: Config,
+  job: Exclude<Job, { kind: "announcement" }>,
+): Announcement {
   switch (job.kind) {
     case "release": {
       const { release } = job;
@@ -476,10 +483,68 @@ export async function findRecentMessage(
   }
 }
 
+function deliveryIdentity(id: string) {
+  const nonce = createHash("sha256")
+    .update(id)
+    .digest("hex")
+    .slice(0, deliveryNonceLength);
+  return { nonce, footer: { text: `${deliveryMarkerPrefix}${nonce}` } };
+}
+
+function recoverDelivery(
+  channel: GuildTextBasedChannel,
+  since: number | null,
+  author: string,
+  marker: string,
+) {
+  if (since === null) return null;
+  // The marker survives a restart after Discord's nonce window expires.
+  return findRecentMessage(
+    channel,
+    since,
+    (message) =>
+      message.author.id === author &&
+      message.embeds.some((embed) => embed.footer?.text === marker),
+  );
+}
+
 export async function drainJobs(guild: Guild, config: Config, store: Store) {
   for (const row of store.nextJobs()) {
     const { job } = row;
     try {
+      const author = guild.client.user.id;
+      if (job.kind === "announcement") {
+        const channel = await textChannel(guild, job.channel);
+        assertBotPermissions(channel, guild.members.me!, [
+          ViewChannel,
+          SendMessages,
+          ReadMessageHistory,
+          EmbedLinks,
+        ]);
+        let firstMessage: string | undefined;
+        store.startJob(row.id);
+        for (const [index, [first, ...rest]] of job.messages.entries()) {
+          const { nonce, footer } = deliveryIdentity(`${row.id}:${index}`);
+          const existing = await recoverDelivery(
+            channel,
+            row.first_attempt,
+            author,
+            footer.text,
+          );
+          const posted =
+            existing ??
+            (await channel.send({
+              embeds: [{ ...first, footer }, ...rest],
+              allowedMentions: quiet,
+              nonce,
+              enforceNonce: true,
+            }));
+          firstMessage ??= posted.id;
+        }
+        store.sent(row.id, firstMessage!);
+        log("info", "delivered", { id: row.id, message: firstMessage });
+        continue;
+      }
       let channel: GuildTextBasedChannel;
       switch (job.kind) {
         case "welcome": {
@@ -529,25 +594,16 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
           break;
       }
 
-      // Discord enforces a short nonce window. The footer also lets us recover a
-      // successful send after a longer restart or an ambiguous network failure.
-      const nonce = createHash("sha256")
-        .update(row.id)
-        .digest("hex")
-        .slice(0, 24);
-      const marker = `Benchy • ${nonce}`;
-      if (row.first_attempt !== null) {
-        const existing = await findRecentMessage(
-          channel,
-          row.first_attempt,
-          (message) =>
-            message.author.id === guild.client.user.id &&
-            message.embeds.some((embed) => embed.footer?.text === marker),
-        );
-        if (existing) {
-          store.sent(row.id, existing.id);
-          continue;
-        }
+      const { nonce, footer } = deliveryIdentity(row.id);
+      const existing = await recoverDelivery(
+        channel,
+        row.first_attempt,
+        author,
+        footer.text,
+      );
+      if (existing) {
+        store.sent(row.id, existing.id);
+        continue;
       }
       const { embed, components, content, roles, flags, users, reply } =
         announcement(config, job);
@@ -558,7 +614,7 @@ export async function drainJobs(guild: Guild, config: Config, store: Store) {
         reply,
         nonce,
         enforceNonce: true,
-        embeds: [embed.setFooter({ text: marker })],
+        embeds: [embed.setFooter(footer)],
         components,
         allowedMentions: { parse: [], repliedUser: false, users, roles },
       });

@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { APIEmbed } from "discord.js";
 
 export type Release = {
   id: number;
@@ -35,6 +36,7 @@ export type Job =
       author: string;
     }
   | { kind: "welcome"; member: string; joined: number }
+  | { kind: "announcement"; channel: string; messages: APIEmbed[][] }
   | { kind: "audit"; ban: Ban }
   | { kind: "member-audit"; entry: MemberAudit }
   | { kind: "redirect"; source: string; message: string; thread: string };
@@ -49,7 +51,7 @@ type JobRow = {
 
 type Route = { source: string; created: number; thread: string | null };
 
-export type RulesText = {
+export type MarkdownText = {
   title: string;
   markdown: string;
   continuation: string;
@@ -61,7 +63,7 @@ export type RulesMessage = {
 export type RulesPublication = {
   revision: number;
   messages: RulesMessage[];
-  text?: RulesText;
+  text?: MarkdownText;
 };
 
 export class Store {

@@ -966,7 +966,11 @@ test("Contributor claims bind OAuth to the Discord user and verify merged PR aut
   assert.equal(people.get(privileged)?.roles.cache.has(contributorRole), false);
 });
 
-function rulesFlow(guild: Guild, store: Store) {
+function publishingFlow(
+  guild: Guild,
+  store: Store,
+  kind: "rules" | "announcement" = "rules",
+) {
   const handle = commandHandlers(config, store);
   let next = 1;
   const id = () => String(BigInt(command) + BigInt(100 + next++));
@@ -974,7 +978,8 @@ function rulesFlow(guild: Guild, store: Store) {
     async open(changes = {}) {
       const slash = interaction(guild, "slash", {
         id: id(),
-        commandName: "setup",
+        commandName: kind === "rules" ? "setup" : "announce",
+        options: { getChannel: () => null },
         ...changes,
       });
       await handle(slash.input);
@@ -982,13 +987,13 @@ function rulesFlow(guild: Guild, store: Store) {
     },
     async preview(form: string, markdown: string, continuation = "") {
       const values = new Map([
-        ["title", "Server Rules"],
+        ["title", kind === "rules" ? "Server Rules" : "Community update"],
         ["markdown", markdown],
       ]);
       if (continuation) values.set("continuation", continuation);
       const modal = interaction(guild, "modal", {
         id: id(),
-        customId: `rules:form:${form}`,
+        customId: `${kind}:form:${form}`,
         fields: {
           fields: values,
           getTextInputValue: (key: string) => values.get(key),
@@ -997,10 +1002,15 @@ function rulesFlow(guild: Guild, store: Store) {
       await handle(modal.input);
       return modal;
     },
-    async choose(preview: string, action: "publish" | "cancel" | "edit") {
+    async choose(
+      preview: string,
+      action: "publish" | "cancel" | "edit",
+      changes = {},
+    ) {
       const button = interaction(guild, "button", {
         id: id(),
-        customId: `rules:${action}:${preview}`,
+        customId: `${kind}:${action}:${preview}`,
+        ...changes,
       });
       await handle(button.input);
       return button;
@@ -1011,7 +1021,7 @@ function rulesFlow(guild: Guild, store: Store) {
 test("rules require Manage Server and preview privately before stable publication", async (t) => {
   const { store, guild, people, rulesPosts } = setup();
   t.after(() => store.close());
-  const flow = rulesFlow(guild, store);
+  const flow = publishingFlow(guild, store);
   const denied = await flow.open({
     user: { id: author },
     member: people.get(author),
@@ -1087,7 +1097,7 @@ test("rules require Manage Server and preview privately before stable publicatio
 test("publishing after an interrupted Discord response recovers the original rules message", async (t) => {
   const { store, guild, rulesPosts, rulesErrors } = setup();
   t.after(() => store.close());
-  let flow = rulesFlow(guild, store);
+  let flow = publishingFlow(guild, store);
   const preview = await flow.preview(
     (await flow.open()).input.id,
     "Rules before interruption",
@@ -1099,7 +1109,7 @@ test("publishing after an interrupted Discord response recovers the original rul
   assert.equal(rulesPosts.size, 1);
   const [published] = [...rulesPosts.keys()];
 
-  flow = rulesFlow(guild, store);
+  flow = publishingFlow(guild, store);
   const retry = await flow.preview(
     (await flow.open()).input.id,
     "Rules after interruption",
@@ -1111,6 +1121,136 @@ test("publishing after an interrupted Discord response recovers the original rul
     "Rules after interruption",
   );
   assert.equal(store.readRules(rules).messages[0].id, published);
+});
+
+test("announcements use the shared editor and queue only after their author confirms", async (t) => {
+  const { store, guild, people, operations } = setup();
+  t.after(() => store.close());
+  const flow = publishingFlow(guild, store, "announcement");
+  const denied = await flow.open({
+    user: { id: author },
+    member: people.get(author),
+  });
+  assert.equal(denied.output[0].flags, MessageFlags.Ephemeral);
+  assert.match(denied.output[0].content ?? "", /need Manage Server/);
+
+  const opened = await flow.open({
+    options: { getChannel: () => ({ id: release }) },
+  });
+  const form = (opened.output[0] as unknown as ModalBuilder).toJSON();
+  assert.equal(form.title, "Create an announcement");
+  const preview = await flow.preview(opened.input.id, "First **draft**");
+  assert.equal(preview.output[0].content, `Preview for <#${release}>.`);
+  assert.deepEqual(store.nextJobs(), []);
+
+  const edit = await flow.choose(preview.input.id, "edit");
+  assert.match(JSON.stringify(edit.output[0]), /First \*\*draft\*\*/);
+  const markdown = "**Our update** @everyone";
+  const edited = await flow.preview(edit.input.id, markdown);
+  const foreign = await flow.choose(edited.input.id, "publish", {
+    user: { id: privileged },
+  });
+  assert.equal(foreign.output[0].flags, MessageFlags.Ephemeral);
+  assert.deepEqual(store.nextJobs(), []);
+  const confirmation = await flow.choose(edited.input.id, "publish");
+  assert.equal(
+    confirmation.output[0].content,
+    `Announcement queued for <#${release}>.`,
+  );
+  await flow.choose(edited.input.id, "publish");
+  assert.equal(store.nextJobs().length, 1);
+  await drainJobs(guild, config, store);
+
+  const cancelled = await flow.preview(
+    (await flow.open()).input.id,
+    "Cancelled",
+  );
+  assert.equal(cancelled.output[0].content, `Preview for <#${source}>.`);
+  await flow.choose(cancelled.input.id, "cancel");
+  assert.deepEqual(store.nextJobs(), []);
+  assert.equal(operations.length, 1);
+  const [{ channel, message }] = operations;
+  assert.equal(channel, release);
+  assert.deepEqual(message.allowedMentions, { parse: [], repliedUser: false });
+  const embed = message.embeds?.[0] as APIEmbed;
+  assert.equal(embed.title, "Community update");
+  assert.equal(embed.description, markdown);
+  assert.equal(embed.color, embedColors.printBench);
+  assert.equal(embed.author?.icon_url, printBenchLogo);
+  assert.deepEqual(store.readRules(release), { revision: 0, messages: [] });
+});
+
+test("long announcements recover accepted messages before retrying a failed part", async (t) => {
+  const { store, guild, general } = setup();
+  t.after(() => store.close());
+  const history = new Collection<
+    string,
+    {
+      id: string;
+      author: { id: string };
+      embeds: APIEmbed[];
+      createdTimestamp: number;
+    }
+  >();
+  const fetchChannel = guild.channels.fetch.bind(guild.channels);
+  let attempts = 0;
+  const validateMessage = (embeds: APIEmbed[]) => {
+    assert.ok(
+      embeds.reduce(
+        (length, embed) =>
+          length +
+          (embed.title?.length ?? 0) +
+          (embed.description?.length ?? 0) +
+          (embed.author?.name.length ?? 0) +
+          (embed.footer?.text.length ?? 0),
+        0,
+      ) <= 6000,
+    );
+  };
+  guild.channels.fetch = (async (id: string) =>
+    id === source
+      ? {
+          ...general,
+          messages: { fetch: async () => history },
+          async send({ embeds }: { embeds: APIEmbed[] }) {
+            validateMessage(embeds);
+            const saved = {
+              id: String(++attempts),
+              author: { id: bot },
+              embeds,
+              createdTimestamp: Date.now(),
+            };
+            history.set(saved.id, saved);
+            if (attempts === 2)
+              throw Object.assign(new Error("Connection lost"), {
+                status: 503,
+              });
+            return saved;
+          },
+        }
+      : fetchChannel(id)) as typeof guild.channels.fetch;
+
+  const flow = publishingFlow(guild, store, "announcement");
+  const preview = await flow.preview(
+    (await flow.open()).input.id,
+    "a".repeat(4000),
+    "b".repeat(4000),
+  );
+  assert.equal(preview.output.length, 2);
+  assert.equal(preview.output[1].flags, MessageFlags.Ephemeral);
+  await flow.choose(preview.input.id, "publish");
+  await drainJobs(guild, config, store);
+  assert.equal(history.size, 2);
+  store.retry(`announcement:${preview.input.id}`, "Test retry", Date.now());
+  await drainJobs(guild, config, store);
+  assert.equal(attempts, 2);
+  assert.deepEqual(store.nextJobs(), []);
+  const [delivery] = store.status().deliveries;
+  assert.deepEqual({ ...delivery }, { status: "sent", count: 1 });
+  assert.equal(
+    history.get("2")?.embeds[0].title,
+    "Community update (continued)",
+  );
 });
 
 const githubEnv = {

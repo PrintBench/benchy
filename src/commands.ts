@@ -46,7 +46,11 @@ import {
 import { errorDetails, log } from "./log.js";
 import { embedColors, linkButtons, printBenchLogo } from "./embeds.js";
 import { channelOverwrites, coversSupportAudience } from "./permissions.js";
-import { rulesCommands, setupCommand } from "./rules.js";
+import {
+  announceCommand,
+  publishingCommands,
+  setupCommand,
+} from "./publishing.js";
 import type { Ban, Store } from "./store.js";
 
 const {
@@ -127,6 +131,7 @@ function moderationCommand(action: Action) {
 
 export const commands = [
   setupCommand,
+  announceCommand,
   new SlashCommandBuilder()
     .setName("info")
     .setDescription("Share the official PrintBench links"),
@@ -339,7 +344,7 @@ export function commandHandlers(
   const selections = new Actions<Selected>();
   const confirmations = new Actions<PendingAction>();
   const creatingSupport = new Set<string>();
-  const rules = rulesCommands(config, store);
+  const publisher = publishingCommands(config, store);
 
   async function beginSupport(
     interaction: MessageContextMenuCommandInteraction<"cached">,
@@ -838,7 +843,10 @@ export function commandHandlers(
       if (interaction.isChatInputCommand()) {
         switch (interaction.commandName) {
           case "setup":
-            await rules.open(interaction);
+            await publisher.open(interaction, "rules");
+            break;
+          case "announce":
+            await publisher.open(interaction, "announcement");
             break;
           case "info":
             await interaction.reply({
@@ -870,14 +878,20 @@ export function commandHandlers(
         await beginSupport(interaction);
       } else if (
         interaction.isModalSubmit() &&
-        interaction.customId.startsWith("rules:form:")
+        /^(rules|announcement):form:/.test(interaction.customId)
       ) {
-        await rules.preview(interaction);
+        await publisher.preview(
+          interaction,
+          interaction.customId.startsWith("rules:") ? "rules" : "announcement",
+        );
       } else if (
         interaction.isButton() &&
-        interaction.customId.startsWith("rules:")
+        /^(rules|announcement):/.test(interaction.customId)
       ) {
-        await rules.button(interaction);
+        await publisher.button(
+          interaction,
+          interaction.customId.startsWith("rules:") ? "rules" : "announcement",
+        );
       } else if (
         interaction.isModalSubmit() &&
         interaction.customId.startsWith("support:")
