@@ -25,6 +25,7 @@ export type MemberAudit = Omit<Ban, "id"> & {
   evidence?: string;
 };
 
+/** Jobs that deliver a single message. */
 export type Job =
   | { kind: "release"; release: Release }
   | {
@@ -36,10 +37,12 @@ export type Job =
       author: string;
     }
   | { kind: "welcome"; member: string; joined: number }
-  | { kind: "announcement"; channel: string; messages: APIEmbed[][] }
   | { kind: "audit"; ban: Ban }
   | { kind: "member-audit"; entry: MemberAudit }
   | { kind: "redirect"; source: string; message: string; thread: string };
+
+type QueuedJob =
+  Job | { kind: "announcement"; channel: string; messages: APIEmbed[][] };
 
 type JobRow = {
   id: string;
@@ -121,7 +124,7 @@ export class Store {
     }
   }
 
-  enqueue(id: string, job: Job, due = Date.now()) {
+  enqueue(id: string, job: QueuedJob, due = Date.now()) {
     return (
       this.db
         .prepare(
@@ -139,7 +142,7 @@ export class Store {
       .all(now) as JobRow[];
     return rows.map((row) => ({
       ...row,
-      job: JSON.parse(row.payload!) as Job,
+      job: JSON.parse(row.payload!) as QueuedJob,
     }));
   }
 

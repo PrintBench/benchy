@@ -290,10 +290,7 @@ function auditMember(name: string, id: string) {
   return { name, value: `<@${id}>\n\`${id}\``, inline: true };
 }
 
-function announcement(
-  config: Config,
-  job: Exclude<Job, { kind: "announcement" }>,
-): Announcement {
+function announcement(config: Config, job: Job): Announcement {
   switch (job.kind) {
     case "release": {
       const { release } = job;
