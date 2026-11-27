@@ -5,6 +5,7 @@ Benchy is the PrintBench Discord bot. It announces releases, posts newly opened 
 | Command                                       | What it does                                                                                                         |
 | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `/setup rules`                                | Opens a private Markdown preview and publishes to the configured rules channel.                                      |
+| `/announce [channel]`                         | Previews a Markdown announcement privately before publishing it to a text or announcement channel.                   |
 | `/info`                                       | Shares official PrintBench links with the channel.                                                                   |
 | **Apps → Send to Support**                    | Creates an attributed forum post from a selected message and replies with the new link.                              |
 | `/ban member reason`                          | Privately confirms a ban and queues an audit entry after Discord accepts it.                                         |
@@ -50,6 +51,12 @@ Turn off Discord's built-in system-channel join messages if they duplicate the n
 Run `/setup rules` with **Manage Server** and access to the rules channel. Enter an embed title and paste Markdown into the first field. Use the optional second field for longer rules. Each field accepts up to 4,000 characters. Benchy splits longer text into embeds, using section or paragraph breaks where possible. It previews separate Discord messages when the combined embed text exceeds the 6,000-character limit for a single message.
 
 Use **Edit**, **Publish**, or **Cancel** from the private preview. The first publish creates a Benchy-managed rules post that you can pin. Later publishes update it in place with pings suppressed, so links to the primary message stay valid. When a shorter version fits in one message, the preview indicates that publishing removes Benchy's previous continuation.
+
+## Publish an announcement
+
+Run `/announce` with **Manage Server**. Use the current text or announcement channel, or choose one with the optional `channel` argument. You need to be able to view it. Give Benchy View Channel, Send Messages, Embed Links, and Read Message History there.
+
+Enter a title and up to 4,000 characters in each Markdown field. Benchy previews the branded embed privately and splits long announcements across embeds or messages. Use **Edit**, **Publish**, or **Cancel**. Publishing queues a new post, with Markdown mentions disabled.
 
 [Discord embed limits](https://docs.discord.com/developers/resources/message#embed-limits)
 

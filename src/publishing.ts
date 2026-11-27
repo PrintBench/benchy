@@ -3,6 +3,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   MessageFlags,
   ModalBuilder,
   PermissionFlagsBits,
@@ -19,9 +20,10 @@ import type {
 } from "discord.js";
 import { Actions } from "./actions.js";
 import type { Config } from "./config.js";
-import { embedColors } from "./embeds.js";
+import { embedColors, printBenchLogo } from "./embeds.js";
 import {
   assertBotPermissions,
+  deliveryMarkerLength,
   discordCode,
   findRecentMessage,
   member,
@@ -32,7 +34,7 @@ import {
 import type {
   RulesMessage,
   RulesPublication,
-  RulesText,
+  MarkdownText,
   Store,
 } from "./store.js";
 
@@ -47,12 +49,27 @@ const inputLimit = 4_000;
 const descriptionLimit = 4_096;
 const titleLimit = 200;
 const messageLimit = 6_000;
-const rulesPrefix = "rules:";
-const initialText = {
-  title: "PrintBench Rules",
-  markdown: "",
-  continuation: "",
+const announcementAuthor = {
+  name: "PrintBench · Announcement",
+  icon_url: printBenchLogo,
 };
+const editor = {
+  rules: {
+    command: "/setup rules",
+    modalTitle: "Set up server rules",
+    title: "PrintBench Rules",
+    markdownLabel: "Rules in Markdown",
+    cancelMessage: "Rules draft cancelled.",
+  },
+  announcement: {
+    command: "/announce",
+    modalTitle: "Create an announcement",
+    title: "",
+    markdownLabel: "Announcement in Markdown",
+    cancelMessage: "Announcement draft cancelled.",
+  },
+} as const;
+type DraftKind = keyof typeof editor;
 
 export const setupCommand = new SlashCommandBuilder()
   .setName("setup")
@@ -62,6 +79,17 @@ export const setupCommand = new SlashCommandBuilder()
     option
       .setName("rules")
       .setDescription("Preview and publish the rules channel embed"),
+  );
+
+export const announceCommand = new SlashCommandBuilder()
+  .setName("announce")
+  .setDescription("Preview and publish a Markdown announcement")
+  .setDefaultMemberPermissions(ManageGuild)
+  .addChannelOption((option) =>
+    option
+      .setName("channel")
+      .setDescription("Where to publish (defaults to this channel)")
+      .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
   );
 
 function cutAt(text: string, max: number, min: number) {
@@ -133,7 +161,10 @@ function descriptions(body: string) {
   return parts;
 }
 
-export function renderRules(text: RulesText): APIEmbed[][] {
+export function renderMarkdown(
+  text: MarkdownText,
+  kind: DraftKind = "rules",
+): APIEmbed[][] {
   const title = text.title.trim();
   const body = [text.markdown, text.continuation]
     .filter((part) => part.trim())
@@ -141,9 +172,9 @@ export function renderRules(text: RulesText): APIEmbed[][] {
     .replace(/\r\n?/g, "\n")
     .replace(/^\n+|\s+$/g, "");
   if (!title || title.length > titleLimit)
-    throw new UserError("Enter a rules title of up to 200 characters.");
+    throw new UserError("Enter an embed title of up to 200 characters.");
   if (!text.markdown.trim())
-    throw new UserError("Enter the rules in the first Markdown field.");
+    throw new UserError(`Enter the ${kind} in the first Markdown field.`);
   if (
     text.markdown.length > inputLimit ||
     text.continuation.length > inputLimit
@@ -153,15 +184,22 @@ export function renderRules(text: RulesText): APIEmbed[][] {
   const groups: APIEmbed[][] = [[]];
   let group = groups[0];
   let size = title.length;
+  const budget =
+    kind === "announcement"
+      ? messageLimit - announcementAuthor.name.length - deliveryMarkerLength
+      : messageLimit;
   for (const description of descriptions(body)) {
-    if (size + description.length > messageLimit) {
+    if (size + description.length > budget) {
       group = [];
       groups.push(group);
       size = title.length + " (continued)".length;
     }
     group.push({
       ...(group.length === 0
-        ? { title: groups.length === 1 ? title : `${title} (continued)` }
+        ? {
+            title: groups.length === 1 ? title : `${title} (continued)`,
+            ...(kind === "announcement" && { author: announcementAuthor }),
+          }
         : {}),
       description,
       color: embedColors.printBench,
@@ -171,10 +209,10 @@ export function renderRules(text: RulesText): APIEmbed[][] {
   return groups;
 }
 
-function modal(id: string, text: RulesText) {
+function modal(id: string, kind: DraftKind, text: MarkdownText) {
   const form = new ModalBuilder()
-    .setTitle("Set up server rules")
-    .setCustomId(`${rulesPrefix}form:${id}`);
+    .setTitle(editor[kind].modalTitle)
+    .setCustomId(`${kind}:form:${id}`);
   const fields = [
     {
       id: "title",
@@ -185,7 +223,7 @@ function modal(id: string, text: RulesText) {
     },
     {
       id: "markdown",
-      label: "Rules in Markdown",
+      label: editor[kind].markdownLabel,
       value: text.markdown,
       max: inputLimit,
       required: true,
@@ -262,10 +300,10 @@ async function updateRules(
   channel: RulesChannel,
   store: Store,
   publication: RulesPublication,
-  text: RulesText,
+  text: MarkdownText,
 ) {
   const save = () => store.saveRules(channel.id, publication);
-  const groups = renderRules(text);
+  const groups = renderMarkdown(text);
   publication.revision++;
   save();
 
@@ -327,40 +365,58 @@ async function updateRules(
 
 type Session = {
   owner: string;
-  revision: number;
-  text: RulesText;
+  channel: string;
+  text: MarkdownText;
   stage: "form" | "preview";
-};
+} & ({ kind: "rules"; revision: number } | { kind: "announcement" });
 
 function requireManager(
   permissions: { has(permission: bigint): boolean } | null,
+  kind: DraftKind,
 ) {
   if (!permissions?.has(ManageGuild))
-    throw new UserError("You need Manage Server to publish the rules.");
+    throw new UserError(
+      kind === "rules"
+        ? "You need Manage Server to publish the rules."
+        : "You need Manage Server to publish an announcement.",
+    );
 }
 
-export function rulesCommands(config: Config, store: Store) {
+export function publishingCommands(config: Config, store: Store) {
   const sessions = new Actions<Session>();
   let publishing = false;
 
-  function take(id: string, owner: string, stage: Session["stage"]) {
+  function take(
+    kind: DraftKind,
+    id: string,
+    owner: string,
+    stage: Session["stage"],
+  ) {
     const session = sessions.get(id);
-    if (!session || session.owner !== owner || session.stage !== stage)
+    if (
+      session?.kind !== kind ||
+      session.owner !== owner ||
+      session.stage !== stage
+    )
       throw new UserError(
-        "This rules draft has expired. Run /setup rules again.",
+        `This ${kind} draft is unavailable. Run ${editor[kind].command} again.`,
       );
     sessions.remove(id);
     return session;
   }
 
-  async function destination(guild: Guild, owner: string) {
+  async function destination(guild: Guild, session: Session) {
     const [channel, manager] = await Promise.all([
-      textChannel(guild, config.rules),
-      member(guild, owner),
+      textChannel(guild, session.channel),
+      member(guild, session.owner),
     ]);
-    requireManager(manager.permissions);
+    requireManager(manager.permissions, session.kind);
     if (!channel.permissionsFor(manager).has(ViewChannel))
-      throw new UserError("You need access to the configured rules channel.");
+      throw new UserError(
+        session.kind === "rules"
+          ? "You need access to the configured rules channel."
+          : "You need access to the announcement channel.",
+      );
     assertBotPermissions(channel, guild.members.me!, [
       ViewChannel,
       SendMessages,
@@ -371,22 +427,45 @@ export function rulesCommands(config: Config, store: Store) {
   }
 
   return {
-    async open(interaction: ChatInputCommandInteraction<"cached">) {
-      requireManager(interaction.member.permissions);
-      const published = store.readRules(config.rules);
-      const text = published.text ?? initialText;
-      sessions.add(interaction.id, {
+    async open(
+      interaction: ChatInputCommandInteraction<"cached">,
+      kind: DraftKind,
+    ) {
+      requireManager(interaction.member.permissions, kind);
+      const text: MarkdownText = {
+        title: editor[kind].title,
+        markdown: "",
+        continuation: "",
+      };
+      const draft = {
         owner: interaction.user.id,
-        revision: published.revision,
         text,
-        stage: "form",
-      });
-      await interaction.showModal(modal(interaction.id, text));
+        stage: "form" as const,
+      };
+      if (kind === "rules") {
+        const published = store.readRules(config.rules);
+        draft.text = published.text ?? draft.text;
+        sessions.add(interaction.id, {
+          ...draft,
+          kind,
+          channel: config.rules,
+          revision: published.revision,
+        });
+      } else {
+        const channel =
+          interaction.options.getChannel("channel")?.id ??
+          interaction.channelId;
+        sessions.add(interaction.id, { ...draft, kind, channel });
+      }
+      await interaction.showModal(modal(interaction.id, kind, draft.text));
     },
 
-    async preview(interaction: ModalSubmitInteraction<"cached">) {
-      const id = interaction.customId.slice(`${rulesPrefix}form:`.length);
-      const session = take(id, interaction.user.id, "form");
+    async preview(
+      interaction: ModalSubmitInteraction<"cached">,
+      kind: DraftKind,
+    ) {
+      const id = interaction.customId.slice(`${kind}:form:`.length);
+      const session = take(kind, id, interaction.user.id, "form");
       const text = {
         title: interaction.fields.getTextInputValue("title").trim(),
         markdown: interaction.fields.getTextInputValue("markdown"),
@@ -394,26 +473,27 @@ export function rulesCommands(config: Config, store: Store) {
           ? (interaction.fields.getTextInputValue("continuation") ?? "")
           : "",
       };
-      const messages = renderRules(text);
+      const messages = renderMarkdown(text, kind);
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const channel = await destination(interaction.guild, session.owner);
-      const previous = store.readRules(channel.id);
-      if (previous.revision !== session.revision)
+      const channel = await destination(interaction.guild, session);
+      const previous =
+        session.kind === "rules" ? store.readRules(channel.id) : undefined;
+      if (session.kind === "rules" && previous?.revision !== session.revision)
         throw new UserError(
           "The rules changed while you were editing. Run /setup rules again.",
         );
       sessions.add(interaction.id, { ...session, stage: "preview", text });
       const controls = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`${rulesPrefix}publish:${interaction.id}`)
+          .setCustomId(`${kind}:publish:${interaction.id}`)
           .setStyle(ButtonStyle.Primary)
           .setLabel("Publish"),
         new ButtonBuilder()
-          .setCustomId(`${rulesPrefix}edit:${interaction.id}`)
+          .setCustomId(`${kind}:edit:${interaction.id}`)
           .setStyle(ButtonStyle.Secondary)
           .setLabel("Edit"),
         new ButtonBuilder()
-          .setCustomId(`${rulesPrefix}cancel:${interaction.id}`)
+          .setCustomId(`${kind}:cancel:${interaction.id}`)
           .setStyle(ButtonStyle.Secondary)
           .setLabel("Cancel"),
       );
@@ -424,7 +504,7 @@ export function rulesCommands(config: Config, store: Store) {
             ? "Preview"
             : `Preview ${index + 1} of ${messages.length}`;
         const cleanup =
-          last && previous.messages.length > messages.length
+          last && previous && previous.messages.length > messages.length
             ? " Publishing also removes Benchy's old continuation message."
             : "";
         const options = {
@@ -442,22 +522,38 @@ export function rulesCommands(config: Config, store: Store) {
       }
     },
 
-    async button(interaction: ButtonInteraction<"cached">) {
+    async button(interaction: ButtonInteraction<"cached">, kind: DraftKind) {
       const [, action, id] = interaction.customId.split(":");
       if (!id || !["publish", "edit", "cancel"].includes(action)) return;
-      const session = take(id, interaction.user.id, "preview");
+      const session = take(kind, id, interaction.user.id, "preview");
       if (action === "cancel") {
         await interaction.update({
-          content: "Rules draft cancelled.",
+          content: editor[kind].cancelMessage,
           embeds: [],
           components: [],
         });
         return;
       }
-      requireManager(interaction.member.permissions);
+      requireManager(interaction.member.permissions, kind);
       if (action === "edit") {
         sessions.add(interaction.id, { ...session, stage: "form" });
-        await interaction.showModal(modal(interaction.id, session.text));
+        await interaction.showModal(modal(interaction.id, kind, session.text));
+        return;
+      }
+      if (session.kind === "announcement") {
+        await interaction.deferUpdate();
+        const channel = await destination(interaction.guild, session);
+        store.enqueue(`announcement:${id}`, {
+          kind: "announcement",
+          channel: channel.id,
+          messages: renderMarkdown(session.text, kind),
+        });
+        await interaction.editReply({
+          content: `Announcement queued for <#${channel.id}>.`,
+          embeds: [],
+          components: [],
+          allowedMentions: quiet,
+        });
         return;
       }
       if (publishing)
@@ -468,7 +564,7 @@ export function rulesCommands(config: Config, store: Store) {
       publishing = true;
       try {
         await interaction.deferUpdate();
-        const channel = await destination(interaction.guild, session.owner);
+        const channel = await destination(interaction.guild, session);
         const published = store.readRules(channel.id);
         if (published.revision !== session.revision)
           throw new UserError(
